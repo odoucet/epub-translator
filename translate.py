@@ -438,7 +438,7 @@ def generate_pdf(epub_path):
         except subprocess.CalledProcessError:
             print("⚠️ Pandoc failed to generate PDF.")
             # optionnaly show docker line :
-            print("You can try running: docker run --rm -v $(pwd):/data pandoc/latex", epub_path.name, "-o", pdf_path.name)
+            print("You can try running: docker run --rm -v $(pwd):/data pandoc/latex", epub_path.name, "-o", pdf_path.name, "--pdf-engine=xelatex")
     else:
         print("⚠️ 'pandoc' not found. Skipping PDF export.")
 

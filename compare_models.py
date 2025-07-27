@@ -18,6 +18,17 @@ LANGUAGES = {
     "chinese": "zh"
 }
 
+MODELS=[
+  "gemma3:1b"
+  "gemma3:4b"
+  "gemma3:12b"
+  "gemma3:27b"
+  "mistral:7b"
+  "mistral-small:24b"
+  "dorian2b/vera"
+  "nous-hermes2"
+]
+
 def extract_plaintext(epub_path, lang_code, chapter_only=None, debug=False):
     from ebooklib import epub
     import ebooklib
@@ -161,7 +172,7 @@ def main():
     parser.add_argument("--file", required=True, help="EPUB file path")
     parser.add_argument("-l", "--lang", required=True, help="Target language")
     parser.add_argument("-o", "--output-file", default="model_comparison.md", help="Output markdown file")
-    parser.add_argument("-m", "--models", nargs="+", default=["gemma3:4b", "vera", "nous-hermes2"])
+    parser.add_argument("-m", "--models", nargs="+", default=MODELS)
     parser.add_argument("-c", "--chapter", type=int, default=3)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode for translate.py")
     parser.add_argument("--timeout", type=int, default=3, help="Timeout in minutes for each model (default: 3)")

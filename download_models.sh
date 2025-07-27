@@ -3,9 +3,12 @@ set -e
 
 # List of models to pull from Ollama
 models=(
+  "gemma3:1b"
   "gemma3:4b"
   "gemma3:12b"
   "gemma3:27b"
+  "mistral:7b"
+  "mistral-small:24b"
   "dorian2b/vera"
   "nous-hermes2"
 )
