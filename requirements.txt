@@ -1,0 +1,5 @@
+beautifulsoup4
+ebooklib
+tqdm
+torch
+openai

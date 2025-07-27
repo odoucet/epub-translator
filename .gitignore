@@ -1,0 +1,5 @@
+*.epub
+*.pdf
+ollama/
+__pycache__/
+.*.json
