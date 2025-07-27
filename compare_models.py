@@ -17,7 +17,7 @@ LANGUAGES = {
     "chinese": "zh"
 }
 
-def extract_plaintext(epub_path, lang_code, chapter_only=None):
+def extract_plaintext(epub_path, lang_code, chapter_only=None, debug=False):
     from ebooklib import epub
     import ebooklib
     from bs4 import BeautifulSoup
@@ -26,12 +26,18 @@ def extract_plaintext(epub_path, lang_code, chapter_only=None):
     texts = []
     valid_chapters = []
     
-    # First, collect all valid chapters (those with enough words)
+    # First, collect all valid chapters (those with enough words) - same logic as translate.py
     for idx, item in enumerate(book.get_items_of_type(ebooklib.ITEM_DOCUMENT)):
         soup = BeautifulSoup(item.get_content(), 'html.parser')
-        text = soup.get_text()
-        if len(text.strip().split()) > 200:
-            valid_chapters.append((idx, text.strip()))
+        text = soup.get_text(strip=True)
+        if len(text.split()) >= 200:  # Same min_words threshold as translate.py
+            valid_chapters.append((idx, text))
+    
+    if debug and chapter_only is not None:
+        print(f"📖 DEBUG: Found {len(valid_chapters)} valid chapters in {epub_path}")
+        for i, (_, text) in enumerate(valid_chapters):
+            chapter_start = text[:50].replace('\n', ' ')
+            print(f"  Chapter {i+1}: {chapter_start}...")
     
     # If chapter_only is specified, return only that chapter (1-based indexing)
     if chapter_only is not None:
@@ -39,8 +45,15 @@ def extract_plaintext(epub_path, lang_code, chapter_only=None):
             # Convert 1-based chapter number to 0-based index
             chapter_idx = chapter_only - 1
             _, text = valid_chapters[chapter_idx]
+            
+            if debug:
+                preview = text[:100].replace('\n', ' ')
+                print(f"📖 DEBUG: Returning chapter {chapter_only}: {preview}...")
+            
             return text
         else:
+            if debug:
+                print(f"❌ DEBUG: Chapter {chapter_only} not found (only {len(valid_chapters)} chapters available)")
             return ""  # Chapter not found
     else:
         # Return all valid chapters
@@ -78,13 +91,13 @@ def normalize_language(lang_input):
     key = lang_input.strip().lower()
     return LANGUAGES.get(key, key)
 
-def run_model_translation(model_name, chapter, lang, input_file):
+def run_model_translation(model_name, chapter, lang, input_file, debug=False):
     # Create a specific output filename for each model
     input_path = Path(input_file)
     lang_code = normalize_language(lang)
     output_file = input_path.parent / f"{input_path.stem}.{model_name}.{lang_code}.epub"
     
-    subprocess.run([
+    cmd = [
         "python", "translate.py",
         "--file", input_file,
         "--lang", lang,
@@ -92,7 +105,17 @@ def run_model_translation(model_name, chapter, lang, input_file):
         "--model", model_name,
         "--output-file", str(output_file),
         "--workspace", f".temp_progress_{model_name}.json"
-    ], check=True)
+    ]
+    
+    if debug:
+        cmd.append("--debug")
+    
+    # Run subprocess and capture/display output in real-time
+    result = subprocess.run(cmd, capture_output=False, text=True)
+    
+    if result.returncode != 0:
+        print(f"❌ Translation failed for model {model_name}")
+        raise subprocess.CalledProcessError(result.returncode, cmd)
     
     return output_file
 
@@ -109,21 +132,37 @@ def main():
     parser = argparse.ArgumentParser(description="Compare translation output from translate.py on a chapter")
     parser.add_argument("--file", required=True, help="EPUB file path")
     parser.add_argument("-l", "--lang", required=True, help="Target language")
-    parser.add_argument("-o", "--output", default="model_comparison.md", help="Output markdown file")
-    parser.add_argument("-m", "--models", nargs="+", default=["mistral", "gemma:2b", "nous-hermes2"])
+    parser.add_argument("-o", "--output-file", default="model_comparison.md", help="Output markdown file")
+    parser.add_argument("-m", "--models", nargs="+", default=["gemma3:4b", "vera", "nous-hermes2"])
     parser.add_argument("-c", "--chapter", type=int, default=3)
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode for translate.py")
     args = parser.parse_args()
 
     outputs = {}
     for model in args.models:
         print(f"🔄 Translating with model: {model}")
-        out_epub = run_model_translation(model, args.chapter, args.lang, args.file)
-        plain = extract_plaintext(out_epub, args.lang, chapter_only=args.chapter)
+        out_epub = run_model_translation(model, args.chapter, args.lang, args.file, debug=args.debug)
+        
+        if args.debug:
+            print(f"🔍 DEBUG - Extracting from translated file: {out_epub}")
+        
+        plain = extract_plaintext(out_epub, args.lang, chapter_only=args.chapter, debug=args.debug)
+        
+        if args.debug:
+            chapter_preview = plain[:100].replace('\n', ' ') if plain else "EMPTY"
+            print(f"🔍 DEBUG - Extracted chapter content: {chapter_preview}...")
+        
         outputs[model] = plain
 
-    original = extract_plaintext(args.file, args.lang, chapter_only=args.chapter)
-    write_markdown(args.output, original, outputs)
-    print(f"✅ Markdown saved to {args.output}")
+    print(f"🔍 DEBUG - Extracting original chapter {args.chapter}")
+    original = extract_plaintext(args.file, args.lang, chapter_only=args.chapter, debug=args.debug)
+    
+    if args.debug:
+        orig_preview = original[:100].replace('\n', ' ') if original else "EMPTY"
+        print(f"🔍 DEBUG - Original chapter content: {orig_preview}...")
+    
+    write_markdown(args.output_file, original, outputs)
+    print(f"✅ Markdown saved to {args.output_file}")
 
 if __name__ == "__main__":
     main()
