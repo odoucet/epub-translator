@@ -239,7 +239,7 @@ def split_html_into_chunks(html_content, max_chars=8000, debug=False):
 
 def translate_single_chunk(api_url, model, prompt, html_chunk, debug=False):
     """
-    Translate a single HTML chunk using the native Ollama API
+    Translate a single HTML chunk using the Ollama API
     """
     payload = {
         "model": model,
@@ -350,14 +350,14 @@ def merge_translated_chunks(chunks, debug=False):
     
     return result
 
-def translate_html_block_native(base_url, model, prompt, html_block, debug=False):
+def translate_html_block(base_url, model, prompt, html_block, debug=False):
     """
     Translate HTML block with automatic chunking fallback if the content is too large
     """
     api_url = base_url.replace('/v1', '').rstrip('/') + '/api/chat'
     
     if debug:
-        print(f"\n🔍 DEBUG - Using native Ollama API:")
+        print(f"\n🔍 DEBUG - Using Ollama API:")
         print(f"URL: {api_url}")
         print(f"Model: {model}")
         print(f"Content length: {len(html_block)} chars")
@@ -443,7 +443,7 @@ def generate_pdf(epub_path):
         print("⚠️ 'pandoc' not found. Skipping PDF export.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Translate EPUB using native Ollama API.")
+    parser = argparse.ArgumentParser(description="Translate EPUB files with automatic chunking for large content.")
     parser.add_argument("--file", required=True, help="Path to the .epub file")
     parser.add_argument("-l", "--lang", required=True, help="Target language (e.g., french, german)")
     parser.add_argument("-p", "--prompt-style", default="literary", help="Prompt style")
@@ -502,7 +502,7 @@ def main():
         if key in translated:
             continue
         try:
-            translated_html = translate_html_block_native(args.url, args.model, prompt, html, debug=args.debug)
+            translated_html = translate_html_block(args.url, args.model, prompt, html, debug=args.debug)
             translated_html, footnotes = convert_translator_notes_to_footnotes(translated_html)
             final_translated = translated_html + "".join(footnotes)
             translated[key] = final_translated

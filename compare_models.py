@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import os
 import tempfile
+import time
 from bs4 import BeautifulSoup
 from pathlib import Path
 
@@ -91,7 +92,7 @@ def normalize_language(lang_input):
     key = lang_input.strip().lower()
     return LANGUAGES.get(key, key)
 
-def run_model_translation(model_name, chapter, lang, input_file, debug=False):
+def run_model_translation(model_name, chapter, lang, input_file, debug=False, timeout_minutes=3):
     # Create a specific output filename for each model
     input_path = Path(input_file)
     lang_code = normalize_language(lang)
@@ -110,23 +111,50 @@ def run_model_translation(model_name, chapter, lang, input_file, debug=False):
     if debug:
         cmd.append("--debug")
     
-    # Run subprocess and capture/display output in real-time
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    # Run subprocess with timeout and capture/display output in real-time
+    start_time = time.time()
+    try:
+        result = subprocess.run(cmd, capture_output=False, text=True, timeout=timeout_minutes * 60)
+        elapsed_time = time.time() - start_time
+        
+        if result.returncode != 0:
+            print(f"❌ Translation failed for model {model_name}")
+            raise subprocess.CalledProcessError(result.returncode, cmd)
+        
+        return output_file, elapsed_time
     
-    if result.returncode != 0:
-        print(f"❌ Translation failed for model {model_name}")
-        raise subprocess.CalledProcessError(result.returncode, cmd)
-    
-    return output_file
+    except subprocess.TimeoutExpired:
+        elapsed_time = time.time() - start_time
+        print(f"⏰ Translation timed out for model {model_name} after {timeout_minutes} minutes")
+        # Return None to indicate failure
+        return None, elapsed_time
 
 def write_markdown(out_file, original_text, model_outputs):
     with open(out_file, "w", encoding="utf-8") as f:
         f.write("# Model Comparison - Chapter Output\n\n")
         f.write("## Original (first 1000 words)\n\n```\n")
         f.write(truncate_text(original_text) + "\n```\n\n")
-        for model, result in model_outputs.items():
-            f.write(f"## {model}\n\n```\n")
-            f.write(truncate_text(result) + "\n```\n\n")
+        
+        # Sort models by execution time for better comparison
+        sorted_models = sorted(model_outputs.items(), key=lambda x: x[1]['time'])
+        
+        for model, data in sorted_models:
+            status = "✅ Success" if data['success'] else "❌ Failed/Timeout"
+            f.write(f"## {model} - {data['time']:.1f}s ({status})\n\n")
+            if data['success']:
+                f.write("```\n")
+                f.write(truncate_text(data['content']) + "\n```\n\n")
+            else:
+                f.write("*Translation failed or timed out*\n\n")
+        
+        # Add timing summary
+        f.write("## Timing Summary\n\n")
+        f.write("| Model | Time (seconds) | Status |\n")
+        f.write("|-------|-----------------|--------|\n")
+        for model, data in sorted_models:
+            status = "✅ Success" if data['success'] else "❌ Failed"
+            f.write(f"| {model} | {data['time']:.1f}s | {status} |\n")
+        f.write("\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Compare translation output from translate.py on a chapter")
@@ -136,23 +164,53 @@ def main():
     parser.add_argument("-m", "--models", nargs="+", default=["gemma3:4b", "vera", "nous-hermes2"])
     parser.add_argument("-c", "--chapter", type=int, default=3)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode for translate.py")
+    parser.add_argument("--timeout", type=int, default=3, help="Timeout in minutes for each model (default: 3)")
     args = parser.parse_args()
 
     outputs = {}
     for model in args.models:
         print(f"🔄 Translating with model: {model}")
-        out_epub = run_model_translation(model, args.chapter, args.lang, args.file, debug=args.debug)
+        start_time = time.time()
         
-        if args.debug:
-            print(f"🔍 DEBUG - Extracting from translated file: {out_epub}")
-        
-        plain = extract_plaintext(out_epub, args.lang, chapter_only=args.chapter, debug=args.debug)
-        
-        if args.debug:
-            chapter_preview = plain[:100].replace('\n', ' ') if plain else "EMPTY"
-            print(f"🔍 DEBUG - Extracted chapter content: {chapter_preview}...")
-        
-        outputs[model] = plain
+        try:
+            result = run_model_translation(model, args.chapter, args.lang, args.file, 
+                                         debug=args.debug, timeout_minutes=args.timeout)
+            out_epub, elapsed_time = result
+            
+            if out_epub is None:
+                # Translation failed or timed out
+                outputs[model] = {
+                    'content': "",
+                    'time': elapsed_time,
+                    'success': False
+                }
+                continue
+            
+            if args.debug:
+                print(f"🔍 DEBUG - Extracting from translated file: {out_epub}")
+            
+            plain = extract_plaintext(out_epub, args.lang, chapter_only=args.chapter, debug=args.debug)
+            
+            if args.debug:
+                chapter_preview = plain[:100].replace('\n', ' ') if plain else "EMPTY"
+                print(f"🔍 DEBUG - Extracted chapter content: {chapter_preview}...")
+            
+            outputs[model] = {
+                'content': plain,
+                'time': elapsed_time,
+                'success': True
+            }
+            
+            print(f"✅ {model} completed in {elapsed_time:.1f}s")
+            
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            print(f"❌ Error with model {model}: {e}")
+            outputs[model] = {
+                'content': "",
+                'time': elapsed_time,
+                'success': False
+            }
 
     print(f"🔍 DEBUG - Extracting original chapter {args.chapter}")
     original = extract_plaintext(args.file, args.lang, chapter_only=args.chapter, debug=args.debug)
@@ -163,6 +221,13 @@ def main():
     
     write_markdown(args.output_file, original, outputs)
     print(f"✅ Markdown saved to {args.output_file}")
+    
+    # Print timing summary to console
+    print("\n📊 Timing Summary:")
+    sorted_models = sorted(outputs.items(), key=lambda x: x[1]['time'])
+    for model, data in sorted_models:
+        status = "✅" if data['success'] else "❌"
+        print(f"  {model}: {data['time']:.1f}s {status}")
 
 if __name__ == "__main__":
     main()
