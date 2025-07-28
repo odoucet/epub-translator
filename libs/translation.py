@@ -1,8 +1,8 @@
 import requests
 from bs4 import BeautifulSoup
 import logging
-from epub_utils import hash_key
-from notes import convert_translator_notes_to_footnotes
+from .epub_utils import hash_key
+from .notes import convert_translator_notes_to_footnotes
 
 logger = logging.getLogger(__name__)
 
