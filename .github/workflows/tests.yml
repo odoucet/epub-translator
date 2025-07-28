@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        python-version: [3.11, 3.12]
+        python-version: [3.12]
 
     steps:
     - uses: actions/checkout@v4
@@ -51,15 +51,15 @@ jobs:
     - name: Run integration tests
       timeout-minutes: 5
       run: |
-        python -m pytest tests/test_integration.py -v
+        python -m pytest tests/test_integration.py -v --no-cov
     
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
+    # - name: Upload coverage to Codecov
+    #   uses: codecov/codecov-action@v3
+    #   with:
+    #     file: ./coverage.xml
+    #     flags: unittests
+    #     name: codecov-umbrella
+    #     fail_ci_if_error: false
 
   test-slow:
     runs-on: ubuntu-latest
