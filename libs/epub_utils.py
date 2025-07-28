@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import hashlib
 from ebooklib import epub
+import ebooklib
 from bs4 import BeautifulSoup
 import logging
 
@@ -57,7 +58,7 @@ def get_html_chunks(book: epub.EpubBook, chapter_only: int | None = None, min_wo
     Extract valid document items from EPUB and return list of (item, raw_html_bytes).
     """
     valid = []
-    for idx, item in enumerate(book.get_items_of_type(epub.ITEM_DOCUMENT)):
+    for idx, item in enumerate(book.get_items_of_type(ebooklib.ITEM_DOCUMENT)):
         soup = BeautifulSoup(item.get_content(), 'html.parser')
         text = soup.get_text(strip=True)
         if len(text.split()) >= min_words:

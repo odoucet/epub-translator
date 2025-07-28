@@ -1,18 +1,52 @@
 # Model Comparison - Chapter Output
 
-## Original (first 1000 words)
+## Original (truncated)
 
 ```
 Chapitre3Le Bien des pauvresUn curé vertueux et sans intrigue est une Providence pour le village.FLEURY.Il faut savoir que le curé de Verrières, vieillard de quatre-vingts ans, mais qui devait à l’air vif de ces montagnes une santé et un caractère de fer, avait le droit de visiter à toute heure la prison, l’hôpital et même le dépôt de mendicité. C’était précisément à six heures du matin que M. Appert, qui de Paris était recommandé au curé, avait eu la sagesse d’arriver dans une petite ville curieuse. Aussitôt il était allé au presbytère.En lisant la lettre que lui écrivait M. le marquis de La Mole, pair de France, et le plus riche propriétaire de la province, le curé Chélan resta pensif.Je suis vieux et aimé ici, se dit-il enfin à mi-voix, ils n’oseraient ! Se tournant tout de suite vers le monsieur de Paris, avec des yeux où, malgré le grand âge, brillait ce feu sacré qui annonce le plaisir de faire une belle action un peu dangereuse :– Venez avec moi, monsieur, et en présence du geôlier et surtout des surveillants du dépôt de mendicité, veuillez n’émettre aucune opinion sur les choses que nous verrons. M. Appert comprit qu’il avait affaire à un homme de cœur : il suivit le vénérable curé, visita la prison, l’hospice, le dépôt, fit beaucoup de questions et, malgré d’étranges réponses, ne se permit pas la moindre marque de blâme.Cette visite dura plusieurs heures. Le curé invita à dîner M. Appert, qui prétendit avoir des lettres à écrire : il ne voulait pas compromettre davantage son généreux compagnon. Vers les trois heures, ces messieurs allèrent achever l’inspection du dépôt de mendicité, et revinrent ensuite à la prison. Là, ils trouvèrent sur la porte le geôlier, espèce de géant de six pieds de haut et à jambes arquées ; sa figure ignoble était devenue hideuse par l’effet de la terreur.– Ah ! monsieur, dit-il au curé, dès qu’il l’aperçut, ce monsieur que je vois là avec vous, n’est-il pas M. Appert ?– Qu’importe ? dit le curé.– C’est que depuis hier j’ai l’ordre le plus précis, et que M. le préfet a envoyé par un gendarme, qui a dû galoper toute la nuit, de ne pas admettre M. Appert dans la prison.– Je vous déclare, monsieur Noiroud, dit le curé, que ce voyageur, qui est avec moi, est M. Appert. Reconnaissez-vous que j’ai le droit d’entrer dans la prison à toute heure du jour et de la nuit, et en me faisant accompagner par qui je veux ?– Oui, M. le curé, dit le geôlier à voix basse, et baissant la tête comme un bouledogue que fait obéir à regret la crainte du bâton. Seulement, M. le curé, j’ai femme et enfants, si je suis dénoncé on me destituera ; je n’ai pour vivre que ma place.– Je serais aussi bien fâché de perdre la mienne, reprit le bon curé, d’une voix de plus en plus émue.– Quelle différence ! reprit vivement le geôlier ; vous, M. le curé, on sait que vous avez 800 livres de rente, du bon bien au soleil…Tels sont les faits qui, commentés, exagérés de vingt façons différentes, agitaient depuis deux jours toutes les passions haineuses de la petite ville de Verrières. Dans ce moment, ils servaient de texte à la petite discussion que M. de Rênal avait avec sa femme. Le matin, suivi de M. Valenod, directeur du dépôt de mendicité, il était allé chez le curé pour lui témoigner le plus vif mécontentement. M. Chélan n’était protégé par personne ; il sentit toute la portée de leurs paroles.– Eh bien, messieurs ! je serai le troisième curé, de quatre-vingts ans d’âge, que l’on destituera dans ce voisinage. Il y a cinquante-six ans que je suis ici ; j’ai baptisé presque tous les habitants de la ville, qui n’était qu’un bourg quand j’y arrivai. Je marie tous les jours des jeunes gens, dont jadis j’ai marié les grands-pères. Verrières est ma famille ; mais je me suis dit, en voyant l’étranger : « Cet homme, venu de Paris, peut être à la vérité un libéral, il n’y en a que trop ; mais quel mal peut-il faire à nos pauvres et à nos prisonniers ? »Les reproches de M. de Rênal, et surtout ceux de M. Valenod, le directeur du dépôt de mendicité, devenant de plus en plus vifs :– Eh bien, messieurs ! faites-moi destituer, s’était écrié le vieux curé, d’une voix tremblante. Je n’en habiterai pas moins le pays. On sait qu’il y a quarante-huit ans, j’ai hérité d’un champ qui rapporte 800 livres. Je vivrai avec ce revenu. Je ne fais point d’économies dans ma place, moi, messieurs, et c’est peut-être pourquoi je ne suis pas si effrayé quand on parle de me la faire perdre.M. de Rénal vivait fort bien avec sa femme ; mais ne sachant que répondre à cette idée, qu’elle lui répétait timidement : « Quel mal ce monsieur de Paris peut-il faire aux prisonniers ? » il était sur le point de se fâcher tout à fait, quand elle jeta un cri. Le second de ses fils venait de monter sur le parapet du mur de la terrasse, et y courait, quoique ce mur fût élevé de plus de vingt pieds sur la vigne qui est de l’autre côté. La crainte d’effrayer son fils et de le faire tomber empêchait Mme de Rênal de lui adresser la parole. Enfin l’enfant, qui riait de sa prouesse, ayant regardé sa mère, vit sa pâleur, sauta sur la promenade et accourut à elle. Il fut bien grondé.Ce petit événement changea le cours de la conversation.– Je veux absolument prendre chez moi Sorel, le fils du scieur de planches, dit M. de Rênal ; il surveillera les enfants, qui commencent à devenir trop diables pour nous. C’est un jeune prêtre, ou autant vaut, bon latiniste, et qui fera faire des progrès aux enfants ; car il a un caractère ferme, dit le curé.
 ```
 
-## gemma3:1bgemma3:4bgemma3:12bgemma3:27bmistral:7bmistral-small:24bdorian2b/veranous-hermes2 - 0.0s (❌ Failed/Timeout)
+## gemma3:1b - 0.0s (❌ Failed)
 
-*Translation failed or timed out*
+*Translation failed*
+
+## gemma3:4b - 0.0s (❌ Failed)
+
+*Translation failed*
+
+## gemma3:12b - 0.0s (❌ Failed)
+
+*Translation failed*
+
+## gemma3:27b - 0.0s (❌ Failed)
+
+*Translation failed*
+
+## mistral:7b - 0.0s (❌ Failed)
+
+*Translation failed*
+
+## mistral-small:24b - 0.0s (❌ Failed)
+
+*Translation failed*
+
+## dorian2b/vera - 0.0s (❌ Failed)
+
+*Translation failed*
+
+## nous-hermes2 - 0.0s (❌ Failed)
+
+*Translation failed*
 
 ## Timing Summary
 
-| Model | Time (seconds) | Status |
-|-------|-----------------|--------|
-| gemma3:1bgemma3:4bgemma3:12bgemma3:27bmistral:7bmistral-small:24bdorian2b/veranous-hermes2 | 0.0s | ❌ Failed |
-
+| Model | Time (s) | Status |
+|-------|-----------|--------|
+| gemma3:1b | 0.0 | ❌ Failed |
+| gemma3:4b | 0.0 | ❌ Failed |
+| gemma3:12b | 0.0 | ❌ Failed |
+| gemma3:27b | 0.0 | ❌ Failed |
+| mistral:7b | 0.0 | ❌ Failed |
+| mistral-small:24b | 0.0 | ❌ Failed |
+| dorian2b/vera | 0.0 | ❌ Failed |
+| nous-hermes2 | 0.0 | ❌ Failed |

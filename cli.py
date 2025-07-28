@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import logging
 from ebooklib import epub
+import ebooklib
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 
@@ -46,7 +47,7 @@ def extract_plaintext(epub_path: Path, lang: str, chapter_only: int = None, debu
     book = epub.read_epub(str(epub_path))
     texts = []
     valid = []
-    for idx, item in enumerate(book.get_items_of_type(epub.ITEM_DOCUMENT)):
+    for idx, item in enumerate(book.get_items_of_type(ebooklib.ITEM_DOCUMENT)):
         soup = BeautifulSoup(item.get_content(), 'html.parser')
         txt = soup.get_text(strip=True)
         if len(txt.split()) >= 200:
@@ -104,8 +105,9 @@ def main():
     parser = argparse.ArgumentParser(description="Translate EPUB or compare models on a chapter.")
     parser.add_argument('-f', '--file', required=True, help="Path to EPUB file")
     parser.add_argument('-l', '--lang', required=True, help="Target language")
+    parser.add_argument('-m', '--model', default='nous-hermes2', help="Model name for translation")
     parser.add_argument('-p', '--prompt-style', default='literary', help="Prompt style")
-    parser.add_argument('-u', '--url', default='http://localhost:11434/v1', help="API base URL")
+    parser.add_argument('-u', '--url', default='http://localhost:11434', help="API base URL")
     parser.add_argument('-w', '--workspace', default='.progress.json', help="Progress file")
     parser.add_argument('--chapter', type=int, help="Chapter number for translation or comparison")
     parser.add_argument('--pdf', action='store_true', help="Export to PDF")
@@ -167,7 +169,7 @@ def main():
             bar.update()
             continue
         try:
-            translated = translate_with_chunking(args.url, args.prompt_style, prompt,
+            translated = translate_with_chunking(args.url, args.model, prompt,
                                                  raw.decode('utf-8'), prog, debug=args.debug)
             if args.debug:
                 debug_data[text] = translated
@@ -183,7 +185,7 @@ def main():
     bar.close()
 
     injected = inject_translations(chunks, trans_map)
-    out_epub = Path(args.output-file or f"{Path(args.file).stem}.{lang_code}.epub")
+    out_epub = Path(args.output_file or f"{Path(args.file).stem}.{lang_code}.epub")
     epub.write_epub(str(out_epub), book)
     logger.info("Saved translated EPUB: %s", out_epub)
     if args.pdf:
