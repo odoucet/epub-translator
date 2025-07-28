@@ -243,12 +243,16 @@ class TestMainFunction:
     
     @patch('cli.setup_logging')
     @patch('cli.PREDEFINED_PROMPTS', {'literary': 'Test prompt for {target_language}'})
-    def test_prompt_formatting(self, mock_setup_logging):
+    @patch('cli.get_chapter_info')
+    def test_prompt_formatting(self, mock_get_chapter_info, mock_setup_logging):
         """Test that prompts are properly formatted with target language."""
         test_args = [
-            "cli.py", "-f", "test.epub", "-l", "French",
+            "cli.py", "-f", "tests/andersen.epub", "-l", "French",
             "--compare", "", "--chapter", "1"
         ]
+        
+        # Mock the chapter info to avoid file reading issues
+        mock_get_chapter_info.return_value = ("Test Chapter", 100)
         
         with patch.object(sys, 'argv', test_args):
             with patch('cli.DEFAULT_MODELS', ['test-model']):
@@ -281,27 +285,32 @@ class TestMainFunction:
             assert model in DEFAULT_MODELS
     
     @patch('cli.setup_logging')
-    def test_debug_mode_enables_logging(self, mock_setup_logging):
+    @patch('cli.get_chapter_info')
+    def test_debug_mode_enables_logging(self, mock_get_chapter_info, mock_setup_logging):
         """Test that debug mode properly enables debug logging."""
         test_args = [
-            "cli.py", "-f", "test.epub", "-l", "en", "--debug",
+            "cli.py", "-f", "tests/andersen.epub", "-l", "en", "--debug",
             "--compare", "", "--chapter", "1"
         ]
+        
+        # Mock the chapter info to avoid file reading issues
+        mock_get_chapter_info.return_value = ("Test Chapter", 100)
         
         with patch.object(sys, 'argv', test_args):
             with patch('cli.run_model_translation', side_effect=SystemExit):
                 with patch('cli.extract_plaintext'):
-                    try:
-                        main()
-                    except SystemExit:
-                        pass
-                    
-                    mock_setup_logging.assert_called_with(True)
+                    with patch('cli.write_markdown'):
+                        try:
+                            main()
+                        except SystemExit:
+                            pass
+                        
+                        mock_setup_logging.assert_called_with(True)
     
     def test_compare_mode_requires_chapter(self):
         """Test that compare mode requires chapter argument."""
         test_args = [
-            "cli.py", "-f", "test.epub", "-l", "en", "--compare"
+            "cli.py", "-f", "tests/andersen.epub", "-l", "en", "--compare"
             # Missing --chapter argument
         ]
         
