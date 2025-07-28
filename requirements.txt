@@ -1,7 +1,6 @@
 beautifulsoup4
 ebooklib
 tqdm
-openai
 pytest
 pytest-mock
 pytest-cov
