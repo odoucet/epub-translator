@@ -3,3 +3,7 @@ ebooklib
 tqdm
 torch
 openai
+pytest
+pytest-mock
+pytest-cov
+responses

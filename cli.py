@@ -78,27 +78,29 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 
 def write_markdown(out_file: Path, original: str, model_data: dict):
     with out_file.open('w', encoding='utf-8') as f:
-        f.write("# Model Comparison - Chapter Output\n\n")
-        f.write("## Original (truncated)\n\n")
-        f.write("```\n")
-        f.write(truncate_text(original) + "\n")
-        f.write("```\n\n")
+        f.write("# Model Comparison - Chapter Output\\n\\n")
+        f.write("## Original (truncated)\\n\\n")
+        f.write("```\\n")
+        f.write(truncate_text(original) + "\\n")
+        f.write("```\\n\\n")
+
         sorted_md = sorted(model_data.items(), key=lambda x: x[1]['time'])
         for model, data in sorted_md:
             status = "✅ Success" if data['success'] else "❌ Failed"
-            f.write(f"## {model} - {data['time']:.1f}s ({status})\n\n")
+            f.write(f"## {model} - {data['time']:.1f}s ({status})\\n\\n")
             if data['success']:
-                f.write("```\n")
-                f.write(truncate_text(data['content']) + "\n")
-                f.write("```\n\n")
+                f.write("```\\n")
+                f.write(truncate_text(data['content']) + "\\n")
+                f.write("```\\n\\n")
             else:
-                f.write("*Translation failed*\n\n")
-        f.write("## Timing Summary\n\n")
-        f.write("| Model | Time (s) | Status |\n")
-        f.write("|-------|-----------|--------|\n")
+                f.write("*Translation failed*\\n\\n")
+
+        f.write("## Timing Summary\\n\\n")
+        f.write("| Model | Time (s) | Status |\\n")
+        f.write("|-------|-----------|--------|\\n")
         for model, data in sorted_md:
             status = "✅ Success" if data['success'] else "❌ Failed"
-            f.write(f"| {model} | {data['time']:.1f} | {status} |\n")
+            f.write(f"| {model} | {data['time']:.1f} | {status} |\\n")
 
 
 def main():

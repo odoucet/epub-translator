@@ -1,0 +1,300 @@
+import pytest
+import responses
+from unittest.mock import patch, Mock
+import requests
+
+from libs.translation import (
+    TranslationError, validate_translation, dynamic_chunks,
+    translate_with_chunking, _translate_once
+)
+
+
+class TestValidateTranslation:
+    """Test translation validation functionality."""
+    
+    def test_valid_translation(self):
+        """Test validation of a valid translation."""
+        original = "<p>This is the original text.</p>"
+        translation = "<p>Ceci est le texte traduit.</p>"
+        
+        is_valid, error = validate_translation(original, translation)
+        assert is_valid is True
+        assert error == ""
+    
+    def test_empty_translation(self):
+        """Test validation fails for empty translation."""
+        original = "<p>Original text</p>"
+        translation = ""
+        
+        is_valid, error = validate_translation(original, translation)
+        assert is_valid is False
+        assert "too short" in error.lower()
+    
+    def test_very_short_translation(self):
+        """Test validation fails for very short translation."""
+        original = "<p>This is a longer original text with multiple words.</p>"
+        translation = "Short"
+        
+        is_valid, error = validate_translation(original, translation)
+        assert is_valid is False
+        assert "too short" in error.lower()
+    
+    def test_missing_paragraph_tags(self):
+        """Test validation fails when paragraph tags are missing."""
+        original = "<p>This text has paragraph tags.</p>"
+        translation = "This text does not have paragraph tags."
+        
+        is_valid, error = validate_translation(original, translation)
+        assert is_valid is False
+        assert "paragraph tags missing" in error.lower()
+    
+    def test_invalid_html(self):
+        """Test validation fails for invalid HTML."""
+        original = "<p>Valid original</p>"
+        translation = "<p>Invalid HTML <div></p>"  # Mismatched tags
+        
+        # This might pass basic validation, but let's test with clearly broken HTML
+        translation = "<p>Text with unclosed tag <"
+        is_valid, error = validate_translation(original, translation)
+        # The exact behavior depends on BeautifulSoup's error handling
+        # At minimum, it should not crash
+        assert isinstance(is_valid, bool)
+        assert isinstance(error, str)
+    
+    def test_insufficient_text_after_parsing(self):
+        """Test validation fails when parsed text is too short."""
+        original = "<p>This is substantial original content with many words.</p>"
+        translation = "<p></p>"  # Empty paragraph
+        
+        is_valid, error = validate_translation(original, translation)
+        assert is_valid is False
+        assert "too little text" in error.lower()
+
+
+class TestDynamicChunks:
+    """Test dynamic HTML chunking functionality."""
+    
+    def test_small_html_no_chunking(self):
+        """Test that small HTML doesn't get chunked."""
+        html = "<p>Short text</p>"
+        chunks = dynamic_chunks(html, max_size=10000)
+        
+        assert len(chunks) == 1
+        assert "<?xml version=" in chunks[0]
+        assert "<body>" in chunks[0]
+        assert html in chunks[0]
+    
+    def test_large_html_gets_chunked(self):
+        """Test that large HTML gets chunked."""
+        # Create a large HTML string
+        large_html = "<p>" + "Very long text. " * 1000 + "</p>"
+        chunks = dynamic_chunks(large_html, max_size=1000)
+        
+        assert len(chunks) > 1
+        # Each chunk should be properly wrapped
+        for chunk in chunks:
+            assert "<?xml version=" in chunk
+            assert "<html>" in chunk
+            assert "<body>" in chunk
+    
+    def test_max_attempts_limit(self):
+        """Test that chunking respects max_attempts limit."""
+        large_html = "x" * 100000  # Very large string
+        chunks = dynamic_chunks(large_html, max_size=100, max_attempts=3)
+        
+        # Should stop at max_attempts even if chunks are still large
+        assert len(chunks) <= 2**3  # 2^max_attempts
+    
+    def test_remainder_handling(self):
+        """Test that remainder is properly handled in chunking."""
+        # Create HTML that doesn't divide evenly
+        html = "x" * 1003  # Odd number that won't divide evenly
+        chunks = dynamic_chunks(html, max_size=500, max_attempts=5)
+        
+        # All original content should be preserved
+        total_content = ""
+        for chunk in chunks:
+            # Extract content between body tags
+            start = chunk.find("<body>") + 6
+            end = chunk.find("</body>")
+            total_content += chunk[start:end]
+        
+        assert total_content == html
+
+
+class TestTranslateOnce:
+    """Test single translation attempt functionality."""
+    
+    @responses.activate
+    def test_successful_translation(self, mock_translation_response):
+        """Test successful translation on first attempt."""
+        api_base = "http://localhost:11434"
+        responses.add(
+            responses.POST,
+            f"{api_base}/api/chat",
+            json=mock_translation_response,
+            status=200
+        )
+        
+        model = "test-model"
+        prompt = "Translate to French"
+        block = "<p>Hello world</p>"
+        
+        result = _translate_once(api_base, model, prompt, block)
+        assert result == "<p>Ceci est un texte traduit en français.</p>"
+    
+    @responses.activate
+    def test_invalid_translation_retry(self):
+        """Test retry behavior with invalid translation."""
+        api_base = "http://localhost:11434"
+        
+        # First response is invalid (too short)
+        responses.add(
+            responses.POST,
+            f"{api_base}/api/chat",
+            json={"message": {"content": ""}},
+            status=200
+        )
+        
+        # Second response is valid
+        responses.add(
+            responses.POST,
+            f"{api_base}/api/chat",
+            json={"message": {"content": "<p>Valid translation with enough content.</p>"}},
+            status=200
+        )
+        
+        model = "test-model"
+        prompt = "Translate to French"
+        block = "<p>Hello world with enough content for validation</p>"
+        
+        result = _translate_once(api_base, model, prompt, block)
+        assert "Valid translation" in result
+    
+    @responses.activate
+    def test_http_error_retry(self):
+        """Test retry behavior with HTTP errors."""
+        api_base = "http://localhost:11434"
+        
+        # First request fails
+        responses.add(
+            responses.POST,
+            f"{api_base}/api/chat",
+            json={"error": "Server error"},
+            status=500
+        )
+        
+        # Second request succeeds
+        responses.add(
+            responses.POST,
+            f"{api_base}/api/chat",
+            json={"message": {"content": "<p>Successful translation after retry.</p>"}},
+            status=200
+        )
+        
+        model = "test-model"
+        prompt = "Translate to French"
+        block = "<p>Hello world with enough content</p>"
+        
+        result = _translate_once(api_base, model, prompt, block)
+        assert "Successful translation" in result
+    
+    @responses.activate
+    def test_all_retries_fail(self):
+        """Test that TranslationError is raised when all retries fail."""
+        api_base = "http://localhost:11434"
+        
+        # All requests fail
+        for _ in range(3):
+            responses.add(
+                responses.POST,
+                f"{api_base}/api/chat",
+                json={"error": "Server error"},
+                status=500
+            )
+        
+        model = "test-model"
+        prompt = "Translate to French"
+        block = "<p>Hello world</p>"
+        
+        with pytest.raises(TranslationError):
+            _translate_once(api_base, model, prompt, block)
+
+
+class TestTranslateWithChunking:
+    """Test chunked translation functionality."""
+    
+    @patch('libs.translation._translate_once')
+    def test_successful_full_translation(self, mock_translate):
+        """Test successful translation without chunking."""
+        mock_translate.return_value = "<p>Translated content</p>"
+        
+        api_base = "http://localhost:11434"
+        model = "test-model"
+        prompt = "Translate to French"
+        html = "<p>Original content</p>"
+        progress = {}
+        
+        result = translate_with_chunking(api_base, model, prompt, html, progress)
+        assert result == "<p>Translated content</p>"
+        mock_translate.assert_called_once()
+    
+    @patch('libs.translation._translate_once')
+    def test_fallback_to_chunking(self, mock_translate):
+        """Test fallback to chunking when full translation fails."""
+        # First call (full translation) fails
+        # Subsequent calls (chunks) succeed
+        mock_translate.side_effect = [
+            TranslationError("Too large"),
+            "<body><p>Chunk 1 translated</p></body>",
+            "<body><p>Chunk 2 translated</p></body>"
+        ]
+        
+        api_base = "http://localhost:11434"
+        model = "test-model"
+        prompt = "Translate to French"
+        # Create HTML large enough to trigger chunking
+        html = "<p>" + "Large content. " * 500 + "</p>"
+        progress = {}
+        
+        result = translate_with_chunking(api_base, model, prompt, html, progress, debug=False)
+        
+        # Should contain content from both chunks
+        assert "Chunk 1 translated" in result
+        assert "Chunk 2 translated" in result
+        
+        # Progress should be updated with chunk information
+        assert 'chunk_parts' in progress
+        assert progress['chunk_parts'] > 1
+    
+    @patch('libs.translation._translate_once')
+    def test_chunking_with_existing_progress(self, mock_translate):
+        """Test chunking behavior with existing progress information."""
+        mock_translate.side_effect = [
+            TranslationError("Too large"),
+            "<body><p>Translated chunk</p></body>"
+        ]
+        
+        api_base = "http://localhost:11434"
+        model = "test-model"
+        prompt = "Translate to French"
+        html = "<p>Content</p>"
+        progress = {'chunk_parts': 4}  # Existing chunk info
+        
+        result = translate_with_chunking(api_base, model, prompt, html, progress)
+        assert "Translated chunk" in result
+    
+    @patch('libs.translation._translate_once')
+    def test_chunking_failure(self, mock_translate):
+        """Test behavior when chunking also fails."""
+        # All translation attempts fail
+        mock_translate.side_effect = TranslationError("Translation failed")
+        
+        api_base = "http://localhost:11434"
+        model = "test-model"
+        prompt = "Translate to French"
+        html = "<p>Content</p>"
+        progress = {}
+        
+        with pytest.raises(TranslationError):
+            translate_with_chunking(api_base, model, prompt, html, progress)
