@@ -1,4 +1,3 @@
-# File: notes.py
 import re
 
 def convert_translator_notes_to_footnotes(html: str, start: int = 1) -> tuple[str, list[str]]:
