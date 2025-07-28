@@ -3,3 +3,4 @@
 ollama/
 __pycache__/
 .*.json
+.coverage

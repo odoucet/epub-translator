@@ -14,3 +14,14 @@ services:
           devices:
             - capabilities: [gpu]
     restart: unless-stopped
+
+  web:
+    build: .
+    container_name: epub_translator_web
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./:/app:rw
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
