@@ -195,9 +195,13 @@ class TestInjectTranslations:
         count = inject_translations(chunks, translations)
         assert count == 0
     
-    def test_inject_translations_html_wrapping(self, sample_epub):
-        """Test that translations are properly wrapped in HTML."""
-        chunks = get_html_chunks(sample_epub, min_words=1)  # Lower threshold
+    def test_inject_translations_html_wrapping(self):
+        """Test that translations are properly wrapped in HTML using real EPUB."""
+        from ebooklib import epub
+        
+        # Use the real andersen.epub file
+        book = epub.read_epub('tests/andersen.epub')
+        chunks = get_html_chunks(book, min_words=100)
         
         if len(chunks) == 0:
             pytest.skip("No chunks available for testing HTML wrapping")
@@ -218,7 +222,7 @@ class TestInjectTranslations:
         new_content = item.get_content().decode('utf-8')
         assert "<?xml version='1.0' encoding='utf-8'?>" in new_content
         assert "<!DOCTYPE html>" in new_content
-        assert "<html>" in new_content
+        assert "<html" in new_content  # Allow for HTML with attributes
         assert "<body>" in new_content
 
 

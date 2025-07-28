@@ -115,17 +115,18 @@ class TestTranslationWorkflow:
             assert "Second chunk translated" in result
             assert "chunk_parts" in progress
     
-    @pytest.mark.skip(reason="EPUB writing has compatibility issues with test fixtures")
-    def test_epub_processing_workflow(self, sample_epub, temp_dir):
-        """Test complete EPUB processing workflow."""
+    def test_epub_processing_workflow(self, temp_dir):
+        """Test complete EPUB processing workflow using real EPUB."""
         from libs.epub_utils import get_html_chunks, inject_translations, hash_key
         from bs4 import BeautifulSoup
+        from ebooklib import epub
         
-        # Get chunks from sample EPUB with lower word threshold
-        chunks = get_html_chunks(sample_epub, min_words=10)
+        # Use the real andersen.epub file
+        book = epub.read_epub('tests/andersen.epub')
+        chunks = get_html_chunks(book, min_words=100)
         
         if len(chunks) == 0:
-            pytest.skip("No chunks available from sample EPUB")
+            pytest.skip("No chunks available from real EPUB")
         
         # Process first chunk
         item, raw_html = chunks[0]
@@ -140,23 +141,20 @@ class TestTranslationWorkflow:
         
         # Inject translations
         count = inject_translations(chunks, translations)
-        assert count >= 0  # Should work if chunks exist
+        assert count >= 1  # Should work with real chunks
         
-        if count > 0:
-            # Verify injection
-            updated_content = item.get_content().decode('utf-8')
-            assert "translated version" in updated_content
+        # Verify injection
+        updated_content = item.get_content().decode('utf-8')
+        assert "translated version" in updated_content
     
     @pytest.mark.slow
-    @pytest.mark.skip(reason="EPUB writing has compatibility issues with test fixtures")
-    def test_full_cli_workflow_simulation(self, sample_epub, temp_dir):
-        """Simulate complete CLI workflow without actual API calls."""
+    def test_full_cli_workflow_simulation(self, temp_dir):
+        """Simulate complete CLI workflow using real EPUB without actual API calls."""
         from cli import write_markdown, extract_plaintext
+        from pathlib import Path
         
-        # Save sample EPUB to file
-        epub_path = temp_dir / "test.epub"
-        from ebooklib import epub
-        epub.write_epub(str(epub_path), sample_epub)
+        # Use the real andersen.epub file
+        epub_path = Path('tests/andersen.epub')
         
         # Extract plaintext (simulating original content)
         original_text = extract_plaintext(epub_path, "en", chapter_only=1)
