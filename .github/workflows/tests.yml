@@ -9,9 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
-        python-version: [3.9, 3.10, 3.11, 3.12]
+        python-version: [3.11, 3.12]
 
     steps:
     - uses: actions/checkout@v4
@@ -43,10 +44,12 @@ jobs:
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     
     - name: Run unit tests
+      timeout-minutes: 10
       run: |
-        python -m pytest tests/ -v --cov=libs --cov=cli --cov-report=xml --cov-report=term-missing -m "not slow"
+        python -m pytest tests/ -v --cov=libs --cov=cli --cov-report=xml --cov-report=term-missing --cov-fail-under=75 -m "not slow"
     
     - name: Run integration tests
+      timeout-minutes: 5
       run: |
         python -m pytest tests/test_integration.py -v
     
