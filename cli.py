@@ -59,6 +59,38 @@ def extract_plaintext(epub_path: Path, lang: str, chapter_only: int = None, debu
     return " ".join(t for _, t in valid)
 
 
+def get_chapter_info(epub_path: Path, chapter: int) -> tuple[str, int]:
+    """Get chapter title and word count for logging purposes."""
+    book = epub.read_epub(str(epub_path))
+    valid_chapters = []
+    
+    for idx, item in enumerate(book.get_items_of_type(ebooklib.ITEM_DOCUMENT)):
+        soup = BeautifulSoup(item.get_content(), 'html.parser')
+        txt = soup.get_text(strip=True)
+        if len(txt.split()) >= 200:
+            # Try to extract title from first heading or first line
+            title = ""
+            for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                heading = soup.find(tag)
+                if heading:
+                    title = heading.get_text(strip=True)
+                    break
+            
+            if not title:
+                # Fallback to first line/sentence
+                first_line = txt.split('\n')[0].strip()
+                if len(first_line) > 100:  # If first line is too long, truncate
+                    first_line = first_line[:97] + "..."
+                title = first_line
+            
+            valid_chapters.append((title, len(txt.split())))
+    
+    if 1 <= chapter <= len(valid_chapters):
+        return valid_chapters[chapter-1]
+    else:
+        return f"Chapter {chapter}", 0
+
+
 def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: Path,
                           prompt: str, url: str, debug: bool = False) -> tuple[str, float]:
     start = time.time()
@@ -78,29 +110,29 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 
 def write_markdown(out_file: Path, original: str, model_data: dict):
     with out_file.open('w', encoding='utf-8') as f:
-        f.write("# Model Comparison - Chapter Output\\n\\n")
-        f.write("## Original (truncated)\\n\\n")
-        f.write("```\\n")
-        f.write(truncate_text(original) + "\\n")
-        f.write("```\\n\\n")
+        f.write("# Model Comparison - Chapter Output\n\n")
+        f.write("## Original (truncated)\n\n")
+        f.write("```\n")
+        f.write(truncate_text(original) + "\n")
+        f.write("```\n\n")
 
         sorted_md = sorted(model_data.items(), key=lambda x: x[1]['time'])
         for model, data in sorted_md:
             status = "✅ Success" if data['success'] else "❌ Failed"
-            f.write(f"## {model} - {data['time']:.1f}s ({status})\\n\\n")
+            f.write(f"## {model} - {data['time']:.1f}s ({status})\n\n")
             if data['success']:
-                f.write("```\\n")
-                f.write(truncate_text(data['content']) + "\\n")
-                f.write("```\\n\\n")
+                f.write("```\n")
+                f.write(truncate_text(data['content']) + "\n")
+                f.write("```\n\n")
             else:
-                f.write("*Translation failed*\\n\\n")
+                f.write("*Translation failed*\n\n")
 
-        f.write("## Timing Summary\\n\\n")
-        f.write("| Model | Time (s) | Status |\\n")
-        f.write("|-------|-----------|--------|\\n")
+        f.write("## Timing Summary\n\n")
+        f.write("| Model | Time (s) | Status |\n")
+        f.write("|-------|-----------|--------|\n")
         for model, data in sorted_md:
             status = "✅ Success" if data['success'] else "❌ Failed"
-            f.write(f"| {model} | {data['time']:.1f} | {status} |\\n")
+            f.write(f"| {model} | {data['time']:.1f} | {status} |\n")
 
 
 def main():
@@ -130,9 +162,14 @@ def main():
             models = [m.strip() for m in args.compare.split(',') if m.strip()]
         if not args.chapter:
             parser.error("--chapter is required for model comparison.")
+        
+        # Get chapter info for better logging
+        chapter_title, word_count = get_chapter_info(Path(args.file), args.chapter)
+        
         outputs = {}
         for model in models:
-            logger.info("Translating chapter %d with model %s", args.chapter, model)
+            logger.info("Translating chapter %d ('%s', %d words) with model %s", 
+                       args.chapter, chapter_title, word_count, model)
             try:
                 content, elapsed = run_model_translation(
                     model, args.chapter, args.lang, Path(args.file), prompt, args.url, debug=args.debug
