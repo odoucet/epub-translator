@@ -342,18 +342,18 @@ class TestResourceIntensiveScenarios:
     """Test scenarios that are resource intensive."""
     
     def test_very_large_epub_processing(self):
-        """Test processing EPUB with many large chapters."""
-        # Create fewer chapters but with more content to make the test more realistic
-        large_chapters = []
-        for i in range(10):  # Reduced from 50 to 10 chapters
-            content = create_large_content(word_count=500)  # 500 words each
-            large_chapters.append((f"Chapter {i+1}", f"<p>{content}</p>"))
+        """Test processing EPUB with many large chapters using real EPUB."""
+        from ebooklib import epub
         
-        book = create_mock_epub_book(chapters=large_chapters)
-        chunks = get_html_chunks(book, min_words=100)  # Lower word requirement
+        # Use the real andersen.epub file
+        book = epub.read_epub('tests/andersen.epub')
+        chunks = get_html_chunks(book, min_words=100)
         
-        # Should process most or all chapters
-        assert len(chunks) >= 5  # At least half the chapters should qualify
+        # Real EPUB should have many qualifying chapters
+        assert len(chunks) >= 10  # Should have many chapters with 100+ words
+        
+        # Test that we can process chunks without errors
+        assert all(len(chunk) == 2 for chunk in chunks)  # Each chunk should be (item, content) tuple
     
     def test_massive_translation_notes(self):
         """Test processing massive number of translation notes."""

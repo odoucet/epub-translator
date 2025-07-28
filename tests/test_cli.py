@@ -92,58 +92,40 @@ class TestTruncateText:
 class TestExtractPlaintext:
     """Test plaintext extraction from EPUB."""
     
-    @pytest.mark.skip(reason="EPUB writing has compatibility issues with test fixtures")
-    def test_extract_all_chapters(self, sample_epub):
-        """Test extracting all chapters from EPUB."""
-        with tempfile.NamedTemporaryFile(suffix='.epub', delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            
-        try:
-            # Save sample epub to temp file
-            from ebooklib import epub
-            epub.write_epub(str(tmp_path), sample_epub)
-            
-            result = extract_plaintext(tmp_path, "en")
-            
-            # Should contain content from valid chapters
-            assert "Chapter 1" in result
-            assert "first chapter" in result
-            # Should not contain short chapter content (below word limit)
-        finally:
-            tmp_path.unlink(missing_ok=True)
+    def test_extract_all_chapters(self):
+        """Test extracting all chapters from real EPUB."""
+        from pathlib import Path
+        
+        # Use the real andersen.epub file
+        epub_path = Path('tests/andersen.epub')
+        result = extract_plaintext(epub_path, "en")
+        
+        # Should extract content successfully from real book
+        assert len(result) > 1000  # Real book should have substantial content
+        assert isinstance(result, str)
     
-    @pytest.mark.skip(reason="EPUB writing has compatibility issues with test fixtures")
-    def test_extract_specific_chapter(self, sample_epub):
-        """Test extracting specific chapter from EPUB."""
-        with tempfile.NamedTemporaryFile(suffix='.epub', delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            
-        try:
-            from ebooklib import epub
-            epub.write_epub(str(tmp_path), sample_epub)
-            
-            result = extract_plaintext(tmp_path, "en", chapter_only=1)
-            
-            # Should contain only first chapter content
-            assert "Chapter 1" in result
-            assert "first chapter" in result
-        finally:
-            tmp_path.unlink(missing_ok=True)
+    def test_extract_specific_chapter(self):
+        """Test extracting specific chapter from real EPUB."""
+        from pathlib import Path
+        
+        # Use the real andersen.epub file
+        epub_path = Path('tests/andersen.epub')
+        result = extract_plaintext(epub_path, "en", chapter_only=1)
+        
+        # Should extract content from first chapter
+        assert len(result) > 100  # Should have some content
+        assert isinstance(result, str)
     
-    @pytest.mark.skip(reason="EPUB writing has compatibility issues with test fixtures")
-    def test_extract_nonexistent_chapter(self, sample_epub):
+    def test_extract_nonexistent_chapter(self):
         """Test extracting non-existent chapter returns empty string."""
-        with tempfile.NamedTemporaryFile(suffix='.epub', delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            
-        try:
-            from ebooklib import epub
-            epub.write_epub(str(tmp_path), sample_epub)
-            
-            result = extract_plaintext(tmp_path, "en", chapter_only=999)
-            assert result == ""
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        from pathlib import Path
+        
+        # Use the real andersen.epub file
+        epub_path = Path('tests/andersen.epub')
+        result = extract_plaintext(epub_path, "en", chapter_only=999)  # Non-existent chapter
+        
+        # Should return empty string for non-existent chapter
+        assert result == ""
 
 
 class TestRunModelTranslation:

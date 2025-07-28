@@ -158,9 +158,13 @@ class TestGetHtmlChunks:
 class TestInjectTranslations:
     """Test translation injection into EPUB chunks."""
     
-    def test_inject_translations_success(self, sample_epub):
-        """Test successful translation injection."""
-        chunks = get_html_chunks(sample_epub, min_words=1)  # Lower threshold
+    def test_inject_translations_success(self):
+        """Test successful translation injection using real EPUB."""
+        from ebooklib import epub
+        
+        # Use the real andersen.epub file
+        book = epub.read_epub('tests/andersen.epub')
+        chunks = get_html_chunks(book, min_words=100)  # Use real chapters
         
         if len(chunks) == 0:
             pytest.skip("No chunks available for testing injection")
@@ -172,11 +176,11 @@ class TestInjectTranslations:
         key = hash_key(text)
         
         translations = {
-            key: "<p>Translated content</p>"
+            key: "<p>Translated content for real EPUB chapter</p>"
         }
         
         count = inject_translations(chunks, translations)
-        assert count >= 0  # Should inject successfully if chunks exist
+        assert count >= 1  # Should inject successfully with real chunks
         
         if count > 0:
             # Verify the content was actually injected
