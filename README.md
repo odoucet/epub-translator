@@ -92,3 +92,8 @@ You also need `pandoc` + `pdflatex` installed if using `--pdf`.
 - `literary`: expressive and narrative with optional translator notes
 - `elegant`: fluent and idiomatic with structure preservation
 - `narrative`: free but faithful rephrasing of content with tag retention
+
+## TODO
+- [ ] improve prompts to better handle HTML structure (lots of failures)
+- [ ] add openai-compatible API support
+- [ ] add "literal" translation.
