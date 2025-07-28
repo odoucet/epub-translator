@@ -31,7 +31,7 @@ DEFAULT_MODELS = [
 ]
 
 
-def truncate_text(text: str, word_limit: int = 1000) -> str:
+def truncate_text(text: str, word_limit: int = 500) -> str:
     words = text.strip().split()
     if len(words) <= word_limit:
         return " ".join(words)
@@ -108,7 +108,36 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
     return plain, elapsed
 
 
+def translate_with_fallback(models: list[str], prompt: str, url: str, html: str, 
+                           progress: dict, debug: bool = False) -> tuple[str, str]:
+    """
+    Try to translate with each model in sequence until one succeeds.
+    Returns (translated_html, successful_model_name)
+    """
+    logger = logging.getLogger(__name__)
+    
+    for i, model in enumerate(models):
+        try:
+            logger.info("Attempting translation with model %s (%d/%d)", model, i+1, len(models))
+            translated = translate_with_chunking(url, model, prompt, html, progress, debug=debug)
+            logger.info("✅ Translation successful with model %s", model)
+            return translated, model
+        except TranslationError as e:
+            logger.warning("❌ Model %s failed: %s", model, e)
+            if i == len(models) - 1:  # Last model
+                logger.error("All %d models failed. Translation unsuccessful.", len(models))
+                raise TranslationError(f"All {len(models)} models failed. Last error: {e}")
+            else:
+                logger.info("Trying next model...")
+    
+    # This should never be reached, but just in case
+    raise TranslationError("All models failed")
+
+
 def write_markdown(out_file: Path, original: str, model_data: dict):
+    # Calculate word count for speed metrics
+    original_word_count = len(original.split())
+    
     with out_file.open('w', encoding='utf-8') as f:
         f.write("# Model Comparison - Chapter Output\n\n")
         f.write("## Original (truncated)\n\n")
@@ -119,7 +148,12 @@ def write_markdown(out_file: Path, original: str, model_data: dict):
         sorted_md = sorted(model_data.items(), key=lambda x: x[1]['time'])
         for model, data in sorted_md:
             status = "✅ Success" if data['success'] else "❌ Failed"
-            f.write(f"## {model} - {data['time']:.1f}s ({status})\n\n")
+            if data['success'] and data['time'] > 0:
+                words_per_min = (original_word_count * 60) / data['time']
+                f.write(f"## {model} - {data['time']:.1f}s ({words_per_min:.0f} words/min) ({status})\n\n")
+            else:
+                f.write(f"## {model} - {data['time']:.1f}s ({status})\n\n")
+            
             if data['success']:
                 f.write("```\n")
                 f.write(truncate_text(data['content']) + "\n")
@@ -128,18 +162,23 @@ def write_markdown(out_file: Path, original: str, model_data: dict):
                 f.write("*Translation failed*\n\n")
 
         f.write("## Timing Summary\n\n")
-        f.write("| Model | Time (s) | Status |\n")
-        f.write("|-------|-----------|--------|\n")
+        f.write("| Model | Time (s) | Words/min | Status |\n")
+        f.write("|-------|-----------|-----------|--------|\n")
         for model, data in sorted_md:
             status = "✅ Success" if data['success'] else "❌ Failed"
-            f.write(f"| {model} | {data['time']:.1f} | {status} |\n")
+            if data['success'] and data['time'] > 0:
+                words_per_min = (original_word_count * 60) / data['time']
+                f.write(f"| {model} | {data['time']:.1f} | {words_per_min:.0f} | {status} |\n")
+            else:
+                f.write(f"| {model} | {data['time']:.1f} | N/A | {status} |\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Translate EPUB or compare models on a chapter.")
     parser.add_argument('-f', '--file', required=True, help="Path to EPUB file")
     parser.add_argument('-l', '--lang', required=True, help="Target language")
-    parser.add_argument('-m', '--model', default='nous-hermes2', help="Model name for translation")
+    parser.add_argument('-m', '--model', nargs='+', default=['mistral:7b', 'nous-hermes2'], 
+                       help="Model name(s) for translation - if multiple provided, will fallback in order")
     parser.add_argument('-p', '--prompt-style', default='literary', help="Prompt style")
     parser.add_argument('-u', '--url', default='http://localhost:11434', help="API base URL")
     parser.add_argument('-w', '--workspace', default='.progress.json', help="Progress file")
@@ -208,13 +247,17 @@ def main():
             bar.update()
             continue
         try:
-            translated = translate_with_chunking(args.url, args.model, prompt,
-                                                 raw.decode('utf-8'), prog, debug=args.debug)
+            # Use fallback system with multiple models
+            translated, successful_model = translate_with_fallback(
+                args.model, prompt, args.url, raw.decode('utf-8'), prog, debug=args.debug
+            )
+            logger.info("✅ Chunk translated successfully with model: %s", successful_model)
+            
             if args.debug:
                 debug_data[text] = translated
                 debug_path.write_text(json.dumps(debug_data, indent=2, ensure_ascii=False), encoding='utf-8')
         except TranslationError as e:
-            logger.error("Translation error: %s", e)
+            logger.error("Translation error with all models: %s", e)
             break
         trans_html, notes = convert_translator_notes_to_footnotes(translated)
         trans_map[key] = trans_html + ''.join(notes)
