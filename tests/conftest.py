@@ -34,41 +34,44 @@ def sample_epub():
     book.set_language('en')
     book.add_author('Test Author')
     
-    # Create a chapter with sufficient content
+    # Create a chapter with sufficient content (200+ words)
+    long_content = "This is a test sentence with multiple words to ensure we meet the minimum word count requirement. " * 50
+    
     chapter1 = epub.EpubHtml(
         title='Chapter 1',
         file_name='chapter1.xhtml',
         lang='en'
     )
-    chapter1.content = '''<?xml version="1.0" encoding="utf-8"?>
-    <!DOCTYPE html>
-    <html xmlns="http://www.w3.org/1999/xhtml">
-    <body>
-    <h1>Chapter 1</h1>
-    <p>This is the first chapter of our test book. It contains enough text to meet the minimum word requirement for processing. The content includes multiple sentences and paragraphs to simulate a real book chapter. This paragraph continues with more text to ensure we have sufficient content for testing purposes. The story begins with our protagonist walking through a mysterious forest, encountering strange creatures and magical elements along the way. As the journey progresses, more characters are introduced and the plot becomes increasingly complex. The chapter concludes with a dramatic cliffhanger that leaves readers eager for more.</p>
-    <p>This is another paragraph with substantial content to ensure the chapter meets the minimum word count requirements. The narrative continues to develop with rich descriptions and engaging dialogue between characters. Multiple plot threads are woven together to create a compelling story that captures the reader's attention and maintains their interest throughout the chapter.</p>
-    </body>
-    </html>'''
+    chapter1.content = f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 1</title></head>
+<body>
+<h1>Chapter 1</h1>
+<p>{long_content}</p>
+</body>
+</html>'''
     
     # Create a short chapter that won't meet word requirements
     chapter2 = epub.EpubHtml(
         title='Short Chapter',
-        file_name='chapter2.xhtml',
+        file_name='chapter2.xhtml', 
         lang='en'
     )
     chapter2.content = '''<?xml version="1.0" encoding="utf-8"?>
-    <!DOCTYPE html>
-    <html xmlns="http://www.w3.org/1999/xhtml">
-    <body>
-    <h1>Short Chapter</h1>
-    <p>Too short.</p>
-    </body>
-    </html>'''
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Short Chapter</title></head>
+<body>
+<h1>Short Chapter</h1>
+<p>Too short.</p>
+</body>
+</html>'''
     
     book.add_item(chapter1)
     book.add_item(chapter2)
     
-    # Add navigation
+    # Add navigation files
     book.toc = (
         epub.Link("chapter1.xhtml", "Chapter 1", "ch1"),
         epub.Link("chapter2.xhtml", "Short Chapter", "ch2")
