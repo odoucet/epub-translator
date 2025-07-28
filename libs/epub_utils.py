@@ -53,7 +53,7 @@ def save_progress(path: Path, progress: dict) -> None:
     temp.replace(path)
 
 
-def get_html_chunks(book: epub.EpubBook, chapter_only: int | None = None, min_words: int = 200) -> list[tuple]:
+def get_html_chunks(book: epub.EpubBook, chapter_only=None, min_words: int = 200):
     """
     Extract valid document items from EPUB and return list of (item, raw_html_bytes).
     """

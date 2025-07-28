@@ -40,17 +40,17 @@ class TestTruncateText:
     
     def test_truncation_at_sentence_end(self):
         """Test truncation prefers sentence endings."""
-        # Create text with sentence ending in first half
-        words_first_half = ["word"] * 400
+        # Create text with sentence ending in the second half of word limit
+        words_first_half = ["word"] * 600  # 60% of 1000 words
         sentence_first_half = " ".join(words_first_half) + "."
         
-        words_second_half = ["word"] * 700
+        words_second_half = ["word"] * 500
         sentence_second_half = " ".join(words_second_half)
         
         text = sentence_first_half + " " + sentence_second_half
         result = truncate_text(text, word_limit=1000)
         
-        # Should truncate at the period
+        # Should truncate at the period since it's after 50% of content
         assert result.endswith(".")
         assert not result.endswith("...")
     
