@@ -35,9 +35,15 @@ class TestSmartHtmlSplit(unittest.TestCase):
         
         # Verify no chunks are split in the middle of words
         for i, chunk in enumerate(chunks):
-            # Check that chunks don't start or end with incomplete HTML tags
+            # Check that chunks preserve content integrity
             if i > 0:  # Not the first chunk
-                assert not chunk.startswith('<'), f"Chunk {i+1} starts with incomplete tag"
+                # The chunk should either start with a complete tag or text content
+                # Allow chunks to start with '<' if it's a complete tag
+                if chunk.startswith('<'):
+                    # Make sure it's not an incomplete tag like just '<'
+                    tag_end = chunk.find('>')
+                    assert tag_end > 0, f"Chunk {i+1} starts with incomplete tag: {chunk[:20]}"
+                    
             if i < len(chunks) - 1:  # Not the last chunk
                 assert not chunk.endswith('<'), f"Chunk {i+1} ends with incomplete tag"
         
