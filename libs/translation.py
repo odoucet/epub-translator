@@ -289,7 +289,15 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
             # Try chunking with progressively halved sizes
             # Start with body content size and halve until we get manageable chunks
             initial_size = len(body_content)
-            chunk_size = min(initial_size // 2, 16000)  # Start with half the content or 16k, whichever is smaller
+            
+            # Check if we have a previously successful chunk size to start with
+            preferred_chunk_size = progress.get('preferred_chunk_size')
+            if preferred_chunk_size and preferred_chunk_size < initial_size:
+                logger.debug("%sUsing previously successful chunk size: %d", chapter_prefix, preferred_chunk_size)
+                chunk_size = preferred_chunk_size
+            else:
+                chunk_size = min(initial_size // 2, 16000)  # Start with half the content or 16k, whichever is smaller
+            
             min_chunk_size = 2000  # Don't go below 2k characters
             
             while chunk_size >= min_chunk_size:
@@ -359,8 +367,10 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                         result = wrap_html_content(merged_body, prefix, suffix)
                         
                         logger.debug("%sChunked translation completed successfully with %s", chapter_prefix, model)
-                        # Update progress with chunk information
+                        # Update progress with chunk information and remember successful chunk size
                         progress['chunk_parts'] = len(chunks)
+                        progress['preferred_chunk_size'] = chunk_size
+                        logger.info("%sRemembering successful chunk size: %d chars for future chapters", chapter_prefix, chunk_size)
                         return result, model
                     elif len(chunks) > 0 and len(chunks[0]) < 4000:
                         # Very small chunks failed, try next model
