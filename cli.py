@@ -100,7 +100,12 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
         raise ValueError(f"Chapter {chapter} not found")
     _, raw = chunks[0]
     html = raw.decode('utf-8')
-    translated_html, _ = translate_with_chunking(url, model_name, prompt, html, {}, debug=debug)
+    
+    # Create chapter context for logging
+    chapter_info = f"Chapter {chapter}"
+    
+    translated_html, _ = translate_with_chunking(url, model_name, prompt, html, {}, 
+                                               debug=debug, chapter_info=chapter_info)
     translated_html, notes = convert_translator_notes_to_footnotes(translated_html)
     full_html = translated_html + ''.join(notes)
     plain = BeautifulSoup(full_html, 'html.parser').get_text(strip=True)
@@ -109,7 +114,7 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 
 
 def translate_with_fallback(models: list[str], prompt: str, url: str, html: str, 
-                           progress: dict, debug: bool = False) -> tuple[str, str]:
+                           progress: dict, debug: bool = False, chapter_info: str = None) -> tuple[str, str]:
     """
     Translate using multiple models with intelligent chunking and fallback.
     Returns (translated_html, successful_model_name)
@@ -118,7 +123,8 @@ def translate_with_fallback(models: list[str], prompt: str, url: str, html: str,
     
     try:
         logger.info("Starting translation with models: %s", ", ".join(models))
-        translated, successful_model = translate_with_chunking(url, models, prompt, html, progress, debug=debug)
+        translated, successful_model = translate_with_chunking(url, models, prompt, html, progress, 
+                                                             debug=debug, chapter_info=chapter_info)
         logger.info("✅ Translation successful with model: %s", successful_model)
         return translated, successful_model
         
@@ -229,6 +235,17 @@ def main():
     if not chunks:
         logger.error("No content to translate")
         return
+    
+    # Determine chapter context for logging
+    if args.chapter:
+        # Single chapter mode
+        total_chapters = 1
+        chapter_prefix = f"Chapter {args.chapter}"
+    else:
+        # Multi-chapter mode - count total chapters for context
+        all_chunks = get_html_chunks(book, None)
+        total_chapters = len(all_chunks)
+        
     workspace = Path(args.workspace)
     prog = load_progress(workspace)
     trans_map = prog.get('translated', {})
@@ -239,16 +256,24 @@ def main():
         debug_data = json.loads(debug_path.read_text(encoding='utf-8'))
 
     bar = tqdm(total=len(chunks), desc="Translating")
-    for item, raw in chunks:
+    for chunk_idx, (item, raw) in enumerate(chunks):
         text = BeautifulSoup(raw, 'html.parser').get_text().strip()
         key = hash_key(text)
         if key in trans_map:
             bar.update()
             continue
+        
+        # Create chapter context for this chunk
+        if args.chapter:
+            chapter_info = chapter_prefix
+        else:
+            chapter_info = f"Chapter {chunk_idx + 1}/{total_chapters}"
+            
         try:
             # Use fallback system with multiple models
             translated, successful_model = translate_with_fallback(
-                model_list, prompt, args.url, raw.decode('utf-8'), prog, debug=args.debug
+                model_list, prompt, args.url, raw.decode('utf-8'), prog, 
+                debug=args.debug, chapter_info=chapter_info
             )
             logger.info("✅ Chunk translated successfully with model: %s", successful_model)
             
