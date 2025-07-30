@@ -84,7 +84,8 @@ def inject_translations(chunks: list[tuple], translations: dict[str, str]) -> in
         key = hash_key(text)
         if key in translations:
             translated = translations[key]
-            if not translated.lower().startswith('<html'):
+            # Check if translation already contains complete HTML structure
+            if not (translated.lower().startswith('<?xml') or translated.lower().startswith('<html')):
                 translated = f"<?xml version='1.0' encoding='utf-8'?><!DOCTYPE html><html><head></head><body>{translated}</body></html>"
             item.set_content(translated.encode('utf-8'))
             count += 1
