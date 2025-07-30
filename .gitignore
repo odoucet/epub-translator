@@ -4,3 +4,4 @@ ollama/
 __pycache__/
 .*.json
 .coverage
+debug-lastcall.json

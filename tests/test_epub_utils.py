@@ -225,6 +225,86 @@ class TestInjectTranslations:
         assert "<html" in new_content  # Allow for HTML with attributes
         assert "<body>" in new_content
 
+    def test_inject_translations_complete_html_not_double_wrapped(self):
+        """Test that translations with complete HTML structure are not double-wrapped."""
+        from ebooklib import epub
+        
+        # Use the real andersen.epub file
+        book = epub.read_epub('tests/andersen.epub')
+        chunks = get_html_chunks(book, min_words=100)
+        
+        if len(chunks) == 0:
+            pytest.skip("No chunks available for testing complete HTML injection")
+            
+        item, raw = chunks[0]
+        
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(raw, 'html.parser').get_text().strip()
+        key = hash_key(text)
+        
+        # Translation that already has complete HTML structure (like from cache)
+        complete_html_translation = """<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="fr">
+<head><title>Test</title></head>
+<body><p>Traduction complète en français</p></body>
+</html>"""
+        
+        translations = {
+            key: complete_html_translation
+        }
+        
+        inject_translations(chunks, translations)
+        
+        new_content = item.get_content().decode('utf-8')
+        
+        # Should contain our French content
+        assert "Traduction complète en français" in new_content
+        
+        # Should not contain double HTML structures (key test)
+        assert new_content.count("<?xml") == 1
+        assert new_content.count("<!DOCTYPE html>") == 1
+        assert new_content.count("<html") == 1
+        assert new_content.count("<body>") == 1
+
+    def test_inject_translations_html_tag_start_not_double_wrapped(self):
+        """Test that translations starting with <html are not double-wrapped."""
+        from ebooklib import epub
+        
+        # Use the real andersen.epub file
+        book = epub.read_epub('tests/andersen.epub')
+        chunks = get_html_chunks(book, min_words=100)
+        
+        if len(chunks) == 0:
+            pytest.skip("No chunks available for testing HTML tag start injection")
+            
+        item, raw = chunks[0]
+        
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(raw, 'html.parser').get_text().strip()
+        key = hash_key(text)
+        
+        # Translation that starts with <html tag
+        html_start_translation = """<html xmlns="http://www.w3.org/1999/xhtml" lang="fr">
+<head><title>Test</title></head>
+<body><p>Traduction commençant par html</p></body>
+</html>"""
+        
+        translations = {
+            key: html_start_translation
+        }
+        
+        inject_translations(chunks, translations)
+        
+        new_content = item.get_content().decode('utf-8')
+        
+        # Should contain our French content
+        assert "Traduction commençant par html" in new_content
+        
+        # Should not contain multiple nested HTML structures (key test)
+        assert new_content.count("<html") == 1
+        assert new_content.count("<body>") == 1
+
 
 class TestSetupLogging:
     """Test logging setup functionality."""

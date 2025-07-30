@@ -100,7 +100,12 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
         raise ValueError(f"Chapter {chapter} not found")
     _, raw = chunks[0]
     html = raw.decode('utf-8')
-    translated_html = translate_with_chunking(url, model_name, prompt, html, {}, debug=debug)
+    
+    # Create chapter context for logging
+    chapter_info = f"Chapter {chapter}"
+    
+    translated_html, _ = translate_with_chunking(url, model_name, prompt, html, {}, 
+                                               debug=debug, chapter_info=chapter_info)
     translated_html, notes = convert_translator_notes_to_footnotes(translated_html)
     full_html = translated_html + ''.join(notes)
     plain = BeautifulSoup(full_html, 'html.parser').get_text(strip=True)
@@ -109,29 +114,23 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 
 
 def translate_with_fallback(models: list[str], prompt: str, url: str, html: str, 
-                           progress: dict, debug: bool = False) -> tuple[str, str]:
+                           progress: dict, debug: bool = False, chapter_info: str = None) -> tuple[str, str]:
     """
-    Try to translate with each model in sequence until one succeeds.
+    Translate using multiple models with intelligent chunking and fallback.
     Returns (translated_html, successful_model_name)
     """
     logger = logging.getLogger(__name__)
     
-    for i, model in enumerate(models):
-        try:
-            logger.info("Attempting translation with model %s (%d/%d)", model, i+1, len(models))
-            translated = translate_with_chunking(url, model, prompt, html, progress, debug=debug)
-            logger.info("✅ Translation successful with model %s", model)
-            return translated, model
-        except TranslationError as e:
-            logger.warning("❌ Model %s failed: %s", model, e)
-            if i == len(models) - 1:  # Last model
-                logger.error("All %d models failed. Translation unsuccessful.", len(models))
-                raise TranslationError(f"All {len(models)} models failed. Last error: {e}")
-            else:
-                logger.info("Trying next model...")
-    
-    # This should never be reached, but just in case
-    raise TranslationError("All models failed")
+    try:
+        logger.info("Starting translation with models: %s", ", ".join(models))
+        translated, successful_model = translate_with_chunking(url, models, prompt, html, progress, 
+                                                             debug=debug, chapter_info=chapter_info)
+        logger.info("✅ Translation successful with model: %s", successful_model)
+        return translated, successful_model
+        
+    except TranslationError as e:
+        logger.error("❌ All models failed: %s", e)
+        raise e
 
 
 def write_markdown(out_file: Path, original: str, model_data: dict):
@@ -177,8 +176,8 @@ def main():
     parser = argparse.ArgumentParser(description="Translate EPUB or compare models on a chapter.")
     parser.add_argument('-f', '--file', required=True, help="Path to EPUB file")
     parser.add_argument('-l', '--lang', required=True, help="Target language")
-    parser.add_argument('-m', '--model', nargs='+', default=['mistral:7b', 'nous-hermes2'], 
-                       help="Model name(s) for translation - if multiple provided, will fallback in order")
+    parser.add_argument('-m', '--model', default='mistral:7b,nous-hermes2', 
+                       help="Model name(s) for translation - comma-separated list, will fallback in order (e.g., 'dorian2b/vera,mistral-small:24b')")
     parser.add_argument('-p', '--prompt-style', default='literary', help="Prompt style")
     parser.add_argument('-u', '--url', default='http://localhost:11434', help="API base URL")
     parser.add_argument('-w', '--workspace', default='.progress.json', help="Progress file")
@@ -189,6 +188,12 @@ def main():
     parser.add_argument('--compare', nargs='?', const='', help="Comma-separated models to compare (default all)")
     args = parser.parse_args()
 
+    # Parse comma-separated model names
+    if isinstance(args.model, str):
+        model_list = [m.strip() for m in args.model.split(',') if m.strip()]
+    else:
+        model_list = args.model
+    
     setup_logging(args.debug)
     logger = logging.getLogger(__name__)
 
@@ -206,9 +211,11 @@ def main():
         chapter_title, word_count = get_chapter_info(Path(args.file), args.chapter)
         
         outputs = {}
+        logger.info("🔍 Starting model comparison for chapter %d: '%s' (%d words)", 
+                   args.chapter, chapter_title, word_count)
+        
         for model in models:
-            logger.info("Translating chapter %d ('%s', %d words) with model %s", 
-                       args.chapter, chapter_title, word_count, model)
+            logger.info("[Chapter %d] 🤖 Translating with model %s...", args.chapter, model)
             try:
                 content, elapsed = run_model_translation(
                     model, args.chapter, args.lang, Path(args.file), prompt, args.url, debug=args.debug
@@ -230,6 +237,17 @@ def main():
     if not chunks:
         logger.error("No content to translate")
         return
+    
+    # Determine chapter context for logging
+    if args.chapter:
+        # Single chapter mode
+        total_chapters = 1
+        chapter_prefix = f"Chapter {args.chapter}"
+    else:
+        # Multi-chapter mode - count total chapters for context
+        all_chunks = get_html_chunks(book, None)
+        total_chapters = len(all_chunks)
+        
     workspace = Path(args.workspace)
     prog = load_progress(workspace)
     trans_map = prog.get('translated', {})
@@ -240,16 +258,30 @@ def main():
         debug_data = json.loads(debug_path.read_text(encoding='utf-8'))
 
     bar = tqdm(total=len(chunks), desc="Translating")
-    for item, raw in chunks:
+    for chunk_idx, (item, raw) in enumerate(chunks):
         text = BeautifulSoup(raw, 'html.parser').get_text().strip()
         key = hash_key(text)
         if key in trans_map:
             bar.update()
             continue
+        
+        # Create chapter context for this chunk with title information
+        if args.chapter:
+            chapter_info = chapter_prefix
+        else:
+            # Get chapter title for better context in debug mode
+            chapter_title, _ = get_chapter_info(Path(args.file), chunk_idx + 1)
+            chapter_info = f"Chapter {chunk_idx + 1}/{total_chapters}"
+            
+            if args.debug:
+                logger.info("📖 Processing chapter %d/%d: '%s'", 
+                           chunk_idx + 1, total_chapters, chapter_title)
+            
         try:
             # Use fallback system with multiple models
             translated, successful_model = translate_with_fallback(
-                args.model, prompt, args.url, raw.decode('utf-8'), prog, debug=args.debug
+                model_list, prompt, args.url, raw.decode('utf-8'), prog, 
+                debug=args.debug, chapter_info=chapter_info
             )
             logger.info("✅ Chunk translated successfully with model: %s", successful_model)
             

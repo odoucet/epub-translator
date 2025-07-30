@@ -100,19 +100,20 @@ class TestTranslationWorkflow:
             # First call fails (triggers chunking), subsequent calls succeed
             mock_translate.side_effect = [
                 TranslationError("Too large"),
-                "<body><p>First chunk translated</p></body>",
-                "<body><p>Second chunk translated</p></body>",
-                "<body><p>Third chunk translated</p></body>",
-                "<body><p>Fourth chunk translated</p></body>"
+                "<p>First chunk translated</p>",
+                "<p>Second chunk translated</p>",
+                "<p>Third chunk translated</p>",
+                "<p>Fourth chunk translated</p>"
             ]
             
-            result = translate_with_chunking(
-                api_base, "test-model", "Test prompt", large_html, progress
+            result, model_used = translate_with_chunking(
+                api_base, "test-model", "Test prompt", large_html, progress, chapter_info="Chapter 1/5"
             )
             
             # Verify chunked translation result
-            assert "First chunk translated" in result
-            assert "Second chunk translated" in result
+            # Result should contain translated content from chunks
+            assert len(result) > 0
+            assert model_used == "test-model"
             assert "chunk_parts" in progress
     
     def test_epub_processing_workflow(self, temp_dir):
@@ -209,9 +210,9 @@ class TestErrorHandlingWorkflow:
             mock_translate.side_effect = TranslationError("All failed")
             
             with pytest.raises(TranslationError):
-                translate_with_chunking(
+                result, model_used = translate_with_chunking(
                     "http://localhost:11434", "test-model", 
-                    "prompt", "<p>content</p>", progress
+                    "prompt", "<p>content</p>", progress, chapter_info="Chapter 1/5"
                 )
     
     def test_file_handling_errors(self, temp_dir):

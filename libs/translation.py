@@ -1,6 +1,11 @@
 import requests
 from bs4 import BeautifulSoup
 import logging
+import json
+import time
+from pathlib import Path
+from datetime import datetime
+import re
 from .epub_utils import hash_key
 from .notes import convert_translator_notes_to_footnotes
 
@@ -10,9 +15,71 @@ class TranslationError(Exception):
     pass
 
 
+def extract_html_structure(html: str) -> tuple[str, str, str]:
+    """
+    Extract HTML structure parts: (prefix, body_content, suffix).
+    
+    This separates the XML declaration, DOCTYPE, <html>, <head> tags (prefix)
+    from the actual body content, and the closing tags (suffix).
+    
+    Args:
+        html: Full HTML document string
+        
+    Returns:
+        tuple[str, str, str]: (prefix, body_content, suffix)
+        - prefix: Everything before <body> content (XML, DOCTYPE, html, head tags)
+        - body_content: Just the content inside <body> tags
+        - suffix: Everything after body content (closing </body>, </html> tags)
+    """
+    # Pattern to match everything up to and including <body> tag
+    body_pattern = r'^(.*?<body[^>]*>)(.*?)(<\/body>.*?)$'
+    
+    match = re.search(body_pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        prefix = match.group(1)  # Everything up to and including <body>
+        body_content = match.group(2)  # Content inside <body> tags
+        suffix = match.group(3)  # </body> and everything after
+        return prefix, body_content, suffix
+    else:
+        # If no body tags found, treat entire content as body
+        logger.warning("No <body> tags found in HTML, treating entire content as body")
+        return "", html, ""
+
+
+def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
+    """
+    Wrap translated body content back into the original HTML structure.
+    
+    Args:
+        body_content: Translated content (what goes inside <body> tags)
+        prefix: Original prefix (XML, DOCTYPE, html, head, <body> tags)
+        suffix: Original suffix (</body>, </html> tags)
+        
+    Returns:
+        str: Complete HTML document with translated content
+    """
+    return prefix + body_content + suffix
+
+
 def validate_translation(orig: str, trans: str) -> tuple[bool, str]:
     if not trans or len(trans.strip()) < 10:
         return False, "Translation too short"
+    
+    # Check if input starts with HTML tag and output should too
+    orig_stripped = orig.strip()
+    trans_stripped = trans.strip()
+    
+    if orig_stripped.startswith('<'):
+        # Find the first tag in original
+        first_tag_end = orig_stripped.find('>')
+        if first_tag_end > 0:
+            first_tag = orig_stripped[:first_tag_end + 1]
+            
+            # Translation should start with the same tag
+            if not trans_stripped.startswith(first_tag):
+                return False, f"Output should start with '{first_tag}' but starts with '{trans_stripped[:50]}...'"
+    
     if '<p' in orig and '<p' not in trans:
         return False, "Paragraph tags missing"
     try:
@@ -27,8 +94,17 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str]:
 def dynamic_chunks(html: str, max_size: int = 10000, max_attempts: int = 10) -> list[str]:
     """
     Split html into 2^n chunks, starting from 2,4,8... until chunk size <= max_size or attempts exhausted.
+    Now uses structure-aware splitting to preserve HTML wrapper.
     """
-    total = len(html)
+    # Extract HTML structure
+    prefix, body_content, suffix = extract_html_structure(html)
+    
+    # If no structure found (simple HTML), create a basic wrapper
+    if not prefix and not suffix:
+        prefix = '<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html><head></head><body>'
+        suffix = '</body></html>'
+    
+    total = len(body_content)
     for attempt in range(max_attempts):
         parts = 2 ** (attempt + 1)
         chunk_size = total // parts
@@ -36,153 +112,451 @@ def dynamic_chunks(html: str, max_size: int = 10000, max_attempts: int = 10) -> 
             break
     parts = max(1, 2 ** (attempt + 1))
     size = total // parts
-    # split approximate
-    chunks = [html[i*size:(i+1)*size] for i in range(parts)]
+    
+    # Split only the body content
+    body_chunks = [body_content[i*size:(i+1)*size] for i in range(parts)]
     # last takes remainder
     if parts*size < total:
-        chunks.append(html[parts*size:])
-    logger.debug("Dynamic split into %d parts of ~%d chars", len(chunks), size)
-    return [f'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html><head></head><body>{c}</body></html>' for c in chunks]
-
-
-def translate_with_chunking(api_base: str, model: str, prompt: str, html: str, progress: dict, debug: bool=False) -> str:
-    logger.debug("Starting translate_with_chunking: html length=%d chars", len(html))
+        body_chunks.append(body_content[parts*size:])
     
-    # Try full
-    try:
-        logger.debug("Attempting full translation")
-        result = _translate_once(api_base, model, prompt, html)
-        logger.debug("Full translation successful")
-        return result
-    except TranslationError as e:
-        logger.warning("Full translate failed, attempting chunked: %s", e)
+    # Wrap each body chunk with the original HTML structure
+    wrapped_chunks = []
+    for body_chunk in body_chunks:
+        full_chunk = wrap_html_content(body_chunk, prefix, suffix)
+        wrapped_chunks.append(full_chunk)
+    
+    logger.debug("Dynamic split into %d parts of ~%d chars", len(wrapped_chunks), size)
+    return wrapped_chunks
+
+
+def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
+    """
+    Split HTML at natural tag boundaries to create chunks of approximately target_size.
+    Always splits at HTML tag boundaries - never cuts words or content in half.
+    """
+    if len(html) <= target_size:
+        return [html]
+    
+    # Try to split at major block elements (in order of preference)
+    major_tags = ['</p>', '</div>', '</section>', '</article>', '</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>']
+    
+    chunks = []
+    remaining = html
+    
+    while len(remaining) > target_size:
+        best_split = None
+        best_distance = float('inf')
         
-        # determine chunk_size globally
-        if 'chunk_parts' in progress:
-            attempts = int.bit_length(progress['chunk_parts']) - 1
-            parts = progress['chunk_parts']
-            logger.debug("Using existing chunk_parts from progress: %d", parts)
-        else:
-            attempts = 0
-            parts = 2
-            logger.debug("Starting with initial chunk_parts: %d", parts)
+        # First, try to find a tag close to target_size (within reasonable range)
+        search_start = max(0, target_size - 1000)  # Look back up to 1000 chars
+        search_end = min(len(remaining), target_size + 1000)  # Look ahead up to 1000 chars
         
-        while attempts < 10:
-            logger.debug("Chunking attempt %d", attempts + 1)
-            # dynamic split
-            chunks = dynamic_chunks(html, max_size=10000, max_attempts=10)
-            logger.debug("Created %d chunks", len(chunks))
+        for tag in major_tags:
+            tag_pos = remaining.find(tag, search_start, search_end)
+            if tag_pos != -1:
+                tag_end = tag_pos + len(tag)
+                distance = abs(tag_end - target_size)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_split = tag_end
+        
+        # If no tag found in preferred range, find the first suitable tag after minimum size
+        if best_split is None:
+            min_chunk_size = max(1000, target_size // 4)  # Don't create chunks smaller than 1k or 1/4 target
+            for tag in major_tags:
+                tag_pos = remaining.find(tag, min_chunk_size)
+                if tag_pos != -1:
+                    best_split = tag_pos + len(tag)
+                    break
+        
+        # If still no tag found, find ANY closing tag after minimum size
+        if best_split is None:
+            min_chunk_size = max(1000, target_size // 4)
+            # Look for any closing tag
+            import re
+            tag_pattern = r'</[^>]+>'
+            match = re.search(tag_pattern, remaining[min_chunk_size:])
+            if match:
+                best_split = min_chunk_size + match.end()
+            else:
+                # Last resort: split at target_size but warn
+                logger.warning("No HTML tag found for splitting, forced to cut at position %d", target_size)
+                best_split = target_size
+        
+        # Extract chunk and update remaining
+        chunk = remaining[:best_split].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[best_split:].strip()
+        
+        # Safety check to prevent infinite loops
+        if len(remaining) == len(html):
+            logger.error("Smart HTML split failed to make progress, falling back to simple split")
+            break
+    
+    # Add remaining content
+    if remaining.strip():
+        chunks.append(remaining)
+    
+    logger.debug("Smart HTML split: %d chars -> %d chunks", len(html), len(chunks))
+    return chunks
+
+
+def smart_html_split_with_structure(html: str, target_size: int = 8000) -> list[str]:
+    """
+    Split HTML document into chunks, preserving the original HTML structure.
+    
+    This function:
+    1. Extracts the HTML structure (XML declaration, DOCTYPE, html, head tags)
+    2. Splits only the body content using smart_html_split
+    3. Wraps each chunk back with the original HTML structure
+    
+    Args:
+        html: Full HTML document string
+        target_size: Target size for each chunk
+        
+    Returns:
+        list[str]: List of complete HTML documents, each with full structure
+    """
+    # Extract HTML structure
+    prefix, body_content, suffix = extract_html_structure(html)
+    
+    # Split only the body content
+    body_chunks = smart_html_split(body_content, target_size)
+    
+    # Wrap each body chunk with the original HTML structure
+    structured_chunks = []
+    for body_chunk in body_chunks:
+        full_chunk = wrap_html_content(body_chunk, prefix, suffix)
+        structured_chunks.append(full_chunk)
+    
+    logger.debug("Smart HTML split with structure: %d chars -> %d structured chunks", 
+                len(html), len(structured_chunks))
+    return structured_chunks
+
+
+def translate_with_chunking(api_base: str, models: str | list[str], prompt: str, html: str, progress: dict, 
+                          debug: bool = False, chapter_info: str = None) -> tuple[str, str]:
+    """
+    Translate HTML with intelligent chunking and model fallback.
+    
+    Args:
+        api_base: OpenAI compatible API base URL
+        models: Single model name or list of models to try in order
+        prompt: Translation prompt
+        html: HTML content to translate
+        progress: Progress tracking dictionary
+        debug: Enable debug logging
+        chapter_info: Optional chapter context for logging (e.g., "Chapter 1/5")
+        
+    Returns:
+        tuple[str, str]: (translated_html, successful_model_name)
+    """
+    # Ensure models is a list
+    if isinstance(models, str):
+        model_list = [models]
+    else:
+        model_list = models
+    
+    # Create chapter prefix for logging
+    chapter_prefix = f"{chapter_info} " if chapter_info else ""
+    
+    logger.debug("%sStarting translate_with_chunking: html length=%d chars, models=%s", 
+                chapter_prefix, len(html), model_list)
+    
+    # Extract HTML structure to avoid sending XML/DOCTYPE/head to model
+    prefix, body_content, suffix = extract_html_structure(html)
+    logger.debug("%sExtracted structure: prefix=%d chars, body=%d chars, suffix=%d chars", 
+                chapter_prefix, len(prefix), len(body_content), len(suffix))
+    
+    # Try each model in sequence
+    for model_idx, model in enumerate(model_list):
+        logger.debug("%sTrying model %s (%d/%d)", chapter_prefix, model, model_idx + 1, len(model_list))
+        
+        try:
+            # Try full translation first - only send body content
+            logger.debug("%sAttempting full translation with %s", chapter_prefix, model)
+            translated_body = _translate_once(api_base, model, prompt, body_content, debug, chapter_info)
             
-            translated_chunks = []
-            for i, chunk in enumerate(chunks):
-                logger.debug("Translating chunk %d/%d (length: %d chars)", i+1, len(chunks), len(chunk))
-                try:
-                    translated_chunk = _translate_once(api_base, model, prompt, chunk)
-                    translated_chunks.append(translated_chunk)
-                    logger.debug("Chunk %d/%d translation successful", i+1, len(chunks))
-                except TranslationError as chunk_error:
-                    logger.error("Chunk %d/%d translation failed: %s", i+1, len(chunks), chunk_error)
-                    raise TranslationError(f"Chunked translation failed on chunk {i+1}/{len(chunks)}: {chunk_error}")
+            # Wrap the translated body with the original HTML structure
+            full_translated = wrap_html_content(translated_body, prefix, suffix)
+            logger.debug("%sFull translation successful with %s", chapter_prefix, model)
+            return full_translated, model
             
-            logger.debug("All chunks translated successfully, merging results")
-            result_parts = []
-            for tc in translated_chunks:
+        except TranslationError as e:
+            logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model, e)
+            
+            # Try chunking with progressively halved sizes
+            # Start with body content size and halve until we get manageable chunks
+            initial_size = len(body_content)
+            
+            # Check if we have a previously successful chunk size to start with
+            preferred_chunk_size = progress.get('preferred_chunk_size')
+            if preferred_chunk_size and preferred_chunk_size < initial_size:
+                logger.debug("%sUsing previously successful chunk size: %d", chapter_prefix, preferred_chunk_size)
+                chunk_size = preferred_chunk_size
+            else:
+                chunk_size = min(initial_size // 2, 16000)  # Start with half the content or 16k, whichever is smaller
+            
+            min_chunk_size = 2000  # Don't go below 2k characters
+            
+            while chunk_size >= min_chunk_size:
+                if chunk_size >= initial_size:
+                    # If chunk size is larger than content, reduce and try again
+                    chunk_size = chunk_size // 2
+                    continue
+                    
+                logger.debug("%sTrying chunking with %s, chunk size %d (body content size: %d)", 
+                           chapter_prefix, model, chunk_size, initial_size)
                 try:
-                    soup = BeautifulSoup(tc, 'html.parser')
-                    body = soup.find('body')
-                    if body:
-                        result_parts.append(body.decode_contents())
-                    else:
-                        # Fallback: if no body tag, use the content as-is
-                        logger.warning("No body tag found in translated chunk, using content as-is")
-                        result_parts.append(tc)
+                    # Split only the body content, then wrap each chunk
+                    body_chunks = smart_html_split(body_content, chunk_size)
+                    chunks = [wrap_html_content(body_chunk, prefix, suffix) for body_chunk in body_chunks]
+                    logger.debug("%sCreated %d chunks of target size %d with %s", chapter_prefix, len(chunks), chunk_size, model)
+                    
+                    translated_chunks = []
+                    chunk_failed = False
+                    
+                    for i, chunk in enumerate(chunks):
+                        chunk_prefix = f"{chapter_prefix}Chunk {i+1}/{len(chunks)} "
+                        logger.debug("%sTranslating chunk %d/%d with %s (length: %d chars)", 
+                                   chapter_prefix, i+1, len(chunks), model, len(chunk))
+                        try:
+                            # Track timing for this chunk
+                            chunk_start = time.time()
+                            
+                            # Extract body from this chunk to send to model
+                            _, chunk_body, _ = extract_html_structure(chunk)
+                            translated_body = _translate_once(api_base, model, prompt, chunk_body, debug, 
+                                                           chapter_info, f"Chunk {i+1}/{len(chunks)}")
+                            # Wrap the translated body with the original structure
+                            translated_chunk = wrap_html_content(translated_body, prefix, suffix)
+                            translated_chunks.append(translated_chunk)
+                            
+                            # Calculate timing and speed
+                            chunk_elapsed = time.time() - chunk_start
+                            chars_per_min = int((len(chunk_body) * 60) / chunk_elapsed) if chunk_elapsed > 0 else 0
+                            logger.debug("%sChunk %d/%d ✅ %s - %.1fs (%d chars/min) - %d chars", 
+                                       chapter_prefix, i+1, len(chunks), model, chunk_elapsed, chars_per_min, len(translated_body))
+                        except TranslationError as chunk_error:
+                            logger.warning("%sChunk %d/%d translation failed with %s: %s", 
+                                         chapter_prefix, i+1, len(chunks), model, chunk_error)
+                            # If chunk is small (< 4k) and still failing, try next model
+                            if len(chunk) < 4000 and model_idx < len(model_list) - 1:
+                                logger.info("%sChunk < 4k chars failed with %s, will try next model", 
+                                          chapter_prefix, model)
+                                chunk_failed = True
+                                break
+                            else:
+                                # Try smaller chunks by halving
+                                chunk_failed = True
+                                break
+                    
+                    if not chunk_failed:
+                        # All chunks successful - merge body content and wrap once
+                        logger.debug("%sAll chunks translated successfully with %s, merging results", chapter_prefix, model)
+                        
+                        # Extract body content from each translated chunk and merge
+                        merged_body_parts = []
+                        for translated_chunk in translated_chunks:
+                            _, chunk_body, _ = extract_html_structure(translated_chunk)
+                            merged_body_parts.append(chunk_body)
+                        
+                        # Merge all body parts and wrap with original structure
+                        merged_body = ''.join(merged_body_parts)
+                        result = wrap_html_content(merged_body, prefix, suffix)
+                        
+                        logger.debug("%sChunked translation completed successfully with %s", chapter_prefix, model)
+                        # Update progress with chunk information and remember successful chunk size
+                        progress['chunk_parts'] = len(chunks)
+                        progress['preferred_chunk_size'] = chunk_size
+                        logger.info("%sRemembering successful chunk size: %d chars for future chapters", chapter_prefix, chunk_size)
+                        return result, model
+                    elif len(chunks) > 0 and len(chunks[0]) < 4000:
+                        # Very small chunks failed, try next model
+                        break
+                        
                 except Exception as e:
-                    logger.error("Error parsing translated chunk: %s", e)
-                    logger.debug("Problematic chunk content: %s", tc[:200])
-                    # Fallback: use content as-is
-                    result_parts.append(tc)
+                    logger.error("%sChunking with %s, size %d failed: %s", chapter_prefix, model, chunk_size, e)
+                
+                # Halve the chunk size for next iteration
+                chunk_size = chunk_size // 2
+                logger.debug("%sHalving chunk size to %d", chapter_prefix, chunk_size)
             
-            result = ''.join(result_parts)
-            
-            # record new parts for progress
-            progress['chunk_parts'] = len(chunks)
-            logger.debug("Chunked translation completed successfully")
-            return result
-            
-        raise TranslationError("Chunked translation also failed after 10 attempts")
-
-
-def _translate_once(api_base: str, model: str, prompt: str, block: str) -> str:
-    url = api_base.rstrip('/') + '/api/chat'
-    system = prompt
-    logger.debug("Starting translation with model %s, block length: %d chars", model, len(block))
+            # If we're here, this model failed entirely
+            if model_idx < len(model_list) - 1:
+                logger.info("%sModel %s failed entirely, trying next model", chapter_prefix, model)
+                continue
+            else:
+                logger.error("%sAll models failed", chapter_prefix)
+                raise TranslationError(f"All models ({', '.join(model_list)}) failed")
     
-    for i in range(3):
-        payload = {
+    # Should never reach here
+    raise TranslationError("All models failed")
+
+
+def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: bool = False, 
+                   chapter_info: str = None, chunk_info: str = None) -> str:
+    """
+    Make a single translation request. No retries - if it fails, let the caller handle it.
+    
+    Args:
+        api_base: API base URL
+        model: Model name
+        prompt: Translation prompt
+        block: Content to translate
+        debug: Enable debug logging
+        chapter_info: Optional chapter context (e.g., "Chapter 1/5")
+        chunk_info: Optional chunk context (e.g., "Chunk 1/5")
+    """
+    url = api_base.rstrip('/') + '/api/chat'
+    
+    # Create context prefix for logging
+    context_prefix = ""
+    if chapter_info:
+        context_prefix += chapter_info
+        if chunk_info:
+            context_prefix += f" {chunk_info}"
+        context_prefix += " "
+    elif chunk_info:
+        context_prefix = f"{chunk_info} "
+    
+    payload = {
+        'model': model,
+        'messages': [
+            {'role':'system','content':prompt},
+            {'role':'user','content':block}
+        ],
+        'options':{'seed':101,'temperature':0},
+        'stream':False
+    }
+    
+    # Write debug info to file if debug mode is enabled
+    if debug:
+        debug_data = {
+            'timestamp': datetime.now().isoformat(),
+            'url': url,
+            'payload': payload,
             'model': model,
-            'messages': [
-                {'role':'system','content':system},
-                {'role':'user','content':block}
-            ],
-            'options':{'seed':101,'temperature':0},
-            'stream':False
+            'api_base': api_base,
+            'block_length': len(block),
+            'context': {
+                'chapter': chapter_info,
+                'chunk': chunk_info
+            }
         }
         try:
-            logger.debug("Attempt %d: Making API request to %s", i+1, url)
-            resp = requests.post(url, json=payload, timeout=300)  # Increased to 5 minutes
-            logger.debug("Attempt %d: Got response status %d, content-length: %s", 
-                        i+1, resp.status_code, resp.headers.get('content-length', 'unknown'))
-            
-            resp.raise_for_status()
-            
-            try:
-                resp_json = resp.json()
-                logger.debug("Attempt %d: Response JSON keys: %s", i+1, list(resp_json.keys()))
-                
-                if 'message' not in resp_json:
-                    logger.error("Attempt %d: No 'message' field in response: %s", i+1, resp_json)
-                    raise ValueError("Invalid API response format: missing 'message' field")
-                
-                if 'content' not in resp_json['message']:
-                    logger.error("Attempt %d: No 'content' field in message: %s", i+1, resp_json['message'])
-                    raise ValueError("Invalid API response format: missing 'content' field")
-                
-                content = resp_json['message']['content'].strip()
-                logger.debug("Attempt %d: Got content length: %d chars", i+1, len(content))
-                
-                if not content:
-                    logger.warning("Attempt %d: Empty content received from API", i+1)
-                    raise ValueError("Empty response from API")
-                
-                # Debug: Show sample content for HTML structure analysis
-                content_sample = content[:500].replace('\n', '\\n')
-                logger.debug("Attempt %d: Content sample: %s", i+1, content_sample)
-                
-                valid, err = validate_translation(block, content)
-                logger.debug("Attempt %d: Validation result: valid=%s, error='%s'", i+1, valid, err)
-                
-                if not valid:
-                    # Debug: Show HTML tag comparison
-                    orig_has_p = '<p' in block
-                    trans_has_p = '<p' in content
-                    logger.debug("Attempt %d: Original has <p tags: %s, Translation has <p tags: %s", 
-                               i+1, orig_has_p, trans_has_p)
-                
-                if valid:
-                    logger.debug("Attempt %d: Translation successful", i+1)
-                    return content
-                    
-                system += f"\nPrevious failed: {err}. Preserve HTML."
-                logger.debug("Attempt %d: Validation failed, retrying with updated prompt", i+1)
-                
-            except (KeyError, ValueError, TypeError) as json_err:
-                logger.error("Attempt %d: JSON parsing/structure error: %s", i+1, json_err)
-                logger.debug("Attempt %d: Raw response text: %s", i+1, resp.text[:500])
-                raise ValueError(f"Invalid API response: {json_err}")
-                
-        except Exception as e:
-            logger.error("Translate attempt %d failed: %s", i+1, e)
-            if i == 2:
-                raise TranslationError(f"All retries failed. Last error: {e}")
+            with open('debug-lastcall.json', 'w', encoding='utf-8') as f:
+                json.dump(debug_data, f, indent=2, ensure_ascii=False)
+        except Exception as debug_err:
+            logger.warning("%sFailed to write debug-lastcall.json: %s", context_prefix, debug_err)
     
-    raise TranslationError("All retries failed")
+    try:
+        logger.debug("%sMaking translation request with model %s, block length: %d chars", 
+                    context_prefix, model, len(block))
+        resp = requests.post(url, json=payload, timeout=300)
+        
+        # Update debug file with response if debug mode is enabled
+        if debug:
+            try:
+                with open('debug-lastcall.json', 'r', encoding='utf-8') as f:
+                    debug_data = json.load(f)
+                debug_data['response'] = {
+                    'status_code': resp.status_code,
+                    'headers': dict(resp.headers),
+                    'content_length': len(resp.text) if resp.text else 0
+                }
+                if resp.status_code == 200:
+                    try:
+                        debug_data['response']['json'] = resp.json()
+                    except:
+                        debug_data['response']['text_sample'] = resp.text[:500]
+                else:
+                    debug_data['response']['error_text'] = resp.text[:500]
+                with open('debug-lastcall.json', 'w', encoding='utf-8') as f:
+                    json.dump(debug_data, f, indent=2, ensure_ascii=False)
+            except Exception as debug_err:
+                logger.warning("%sFailed to update debug-lastcall.json with response: %s", context_prefix, debug_err)
+        
+        resp.raise_for_status()
+        
+        try:
+            resp_json = resp.json()
+            
+            if 'message' not in resp_json:
+                raise ValueError("Invalid API response format: missing 'message' field")
+            
+            if 'content' not in resp_json['message']:
+                raise ValueError("Invalid API response format: missing 'content' field")
+            
+            content = resp_json['message']['content'].strip()
+            
+            if not content:
+                raise ValueError("Empty response from API")
+            
+            # Validate the translation
+            valid, err = validate_translation(block, content)
+            
+            if not valid:
+                logger.debug("%sValidation failed: %s", context_prefix, err)
+                logger.debug("%sOriginal has <p> tags: %d, Translation has <p> tags: %d", 
+                           context_prefix, block.count('<p>'), content.count('<p>'))
+                raise TranslationError(f"Translation validation failed: {err}")
+            
+            logger.debug("%sTranslation successful, content length: %d chars", context_prefix, len(content))
+            return content
+            
+        except (KeyError, ValueError, TypeError) as json_err:
+            logger.error("%sJSON parsing/structure error: %s", context_prefix, json_err)
+            raise TranslationError(f"Invalid API response: {json_err}")
+            
+    except Exception as e:
+        logger.error("%sTranslation request failed: %s", context_prefix, e)
+        raise TranslationError(f"Translation failed: {e}")
+
+
+def extract_html_structure(html: str) -> tuple[str, str, str]:
+    """
+    Extract HTML structure parts: (prefix, body_content, suffix).
+    
+    This separates the XML declaration, DOCTYPE, <html>, <head> tags (prefix)
+    from the actual body content, and the closing tags (suffix).
+    
+    Args:
+        html: Full HTML document string
+        
+    Returns:
+        tuple[str, str, str]: (prefix, body_content, suffix)
+        - prefix: Everything before <body> content (XML, DOCTYPE, html, head tags)
+        - body_content: Just the content inside <body> tags
+        - suffix: Everything after body content (closing </body>, </html> tags)
+    """
+    # Pattern to match everything up to and including <body> tag
+    body_start_pattern = r'^(.*?<body[^>]*>)(.*?)(<\/body>.*?)$'
+    
+    match = re.search(body_start_pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        prefix = match.group(1)  # Everything up to and including <body>
+        body_content = match.group(2)  # Content inside <body> tags
+        suffix = match.group(3)  # </body> and everything after
+        return prefix, body_content, suffix
+    else:
+        # If no body tags found, treat entire content as body
+        logger.warning("No <body> tags found in HTML, treating entire content as body")
+        return "", html, ""
+
+
+def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
+    """
+    Wrap translated body content back into the original HTML structure.
+    
+    Args:
+        body_content: Translated content (what goes inside <body> tags)
+        prefix: Original prefix (XML, DOCTYPE, html, head, <body> tags)
+        suffix: Original suffix (</body>, </html> tags)
+        
+    Returns:
+        str: Complete HTML document with translated content
+    """
+    return prefix + body_content + suffix

@@ -62,6 +62,15 @@ To compare model outputs on chapter 3:
 python compare_models.py book.epub -l french -p literary -m mistral gemma:2b -o model_comparison.md
 ```
 
+Our own tests shows :
+* gemma3:1b : hard to keep html structure and follow prompt exactly
+* other gemma3 models: all timeout, to be investigated
+* mistral:7b : hard to keep html structure and follow prompt exactly
+* mistral-small:24b : good (but slow)
+* dorian2b/vera: works very well on small chunks.
+
+
+
 ---
 
 ## 📁 Files Included
