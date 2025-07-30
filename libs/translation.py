@@ -89,12 +89,19 @@ def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
     return chunks
 
 
-def translate_with_chunking(api_base: str, models: str | list[str], prompt: str, html: str, progress: dict, debug: bool=False) -> tuple[str, str]:
+def translate_with_chunking(api_base: str, models: str | list[str], prompt: str, html: str, progress: dict, 
+                          debug: bool = False, chapter_info: str = None) -> tuple[str, str]:
     """
     Translate HTML with intelligent chunking and model fallback.
     
     Args:
+        api_base: OpenAI compatible API base URL
         models: Single model name or list of models to try in order
+        prompt: Translation prompt
+        html: HTML content to translate
+        progress: Progress tracking dictionary
+        debug: Enable debug logging
+        chapter_info: Optional chapter context for logging (e.g., "Chapter 1/5")
         
     Returns:
         tuple[str, str]: (translated_html, successful_model_name)
@@ -105,21 +112,25 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     else:
         model_list = models
     
-    logger.debug("Starting translate_with_chunking: html length=%d chars, models=%s", len(html), model_list)
+    # Create chapter prefix for logging
+    chapter_prefix = f"{chapter_info} " if chapter_info else ""
+    
+    logger.debug("%sStarting translate_with_chunking: html length=%d chars, models=%s", 
+                chapter_prefix, len(html), model_list)
     
     # Try each model in sequence
     for model_idx, model in enumerate(model_list):
-        logger.debug("Trying model %s (%d/%d)", model, model_idx + 1, len(model_list))
+        logger.debug("%sTrying model %s (%d/%d)", chapter_prefix, model, model_idx + 1, len(model_list))
         
         try:
             # Try full translation first
-            logger.debug("Attempting full translation with %s", model)
-            result = _translate_once(api_base, model, prompt, html, debug)
-            logger.debug("Full translation successful with %s", model)
+            logger.debug("%sAttempting full translation with %s", chapter_prefix, model)
+            result = _translate_once(api_base, model, prompt, html, debug, chapter_info)
+            logger.debug("%sFull translation successful with %s", chapter_prefix, model)
             return result, model
             
         except TranslationError as e:
-            logger.warning("Full translate with %s failed: %s", model, e)
+            logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model, e)
             
             # Try chunking with progressively smaller sizes
             chunk_sizes = [16000, 12000, 8000, 4000]
@@ -128,25 +139,31 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                 if len(html) <= chunk_size:
                     continue  # Skip if content is already smaller than chunk size
                     
-                logger.debug("Trying chunking with %s, chunk size %d", model, chunk_size)
+                logger.debug("%sTrying chunking with %s, chunk size %d", chapter_prefix, model, chunk_size)
                 try:
                     chunks = smart_html_split(html, chunk_size)
-                    logger.debug("Created %d chunks of target size %d with %s", len(chunks), chunk_size, model)
+                    logger.debug("%sCreated %d chunks of target size %d with %s", chapter_prefix, len(chunks), chunk_size, model)
                     
                     translated_chunks = []
                     chunk_failed = False
                     
                     for i, chunk in enumerate(chunks):
-                        logger.debug("Translating chunk %d/%d with %s (length: %d chars)", i+1, len(chunks), model, len(chunk))
+                        chunk_prefix = f"{chapter_prefix}Chunk {i+1}/{len(chunks)} "
+                        logger.debug("%sTranslating chunk %d/%d with %s (length: %d chars)", 
+                                   chapter_prefix, i+1, len(chunks), model, len(chunk))
                         try:
-                            translated_chunk = _translate_once(api_base, model, prompt, chunk, debug)
+                            translated_chunk = _translate_once(api_base, model, prompt, chunk, debug, 
+                                                             chapter_info, f"Chunk {i+1}/{len(chunks)}")
                             translated_chunks.append(translated_chunk)
-                            logger.debug("Chunk %d/%d translation successful with %s", i+1, len(chunks), model)
+                            logger.debug("%sChunk %d/%d translation successful with %s", 
+                                       chapter_prefix, i+1, len(chunks), model)
                         except TranslationError as chunk_error:
-                            logger.warning("Chunk %d/%d translation failed with %s: %s", i+1, len(chunks), model, chunk_error)
+                            logger.warning("%sChunk %d/%d translation failed with %s: %s", 
+                                         chapter_prefix, i+1, len(chunks), model, chunk_error)
                             # If chunk is small (< 8k) and still failing, try next model
                             if len(chunk) < 8000 and model_idx < len(model_list) - 1:
-                                logger.info("Chunk < 8k chars failed with %s, will try next model", model)
+                                logger.info("%sChunk < 8k chars failed with %s, will try next model", 
+                                          chapter_prefix, model)
                                 chunk_failed = True
                                 break
                             else:
@@ -156,35 +173,55 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                     
                     if not chunk_failed:
                         # All chunks successful - merge results
-                        logger.debug("All chunks translated successfully with %s, merging results", model)
+                        logger.debug("%sAll chunks translated successfully with %s, merging results", chapter_prefix, model)
                         result = ''.join(translated_chunks)
-                        logger.debug("Chunked translation completed successfully with %s", model)
+                        logger.debug("%sChunked translation completed successfully with %s", chapter_prefix, model)
                         return result, model
                     elif len(chunk) < 8000:
                         # Small chunk failed, break to try next model
                         break
                         
                 except Exception as e:
-                    logger.error("Chunking with %s, size %d failed: %s", model, chunk_size, e)
+                    logger.error("%sChunking with %s, size %d failed: %s", chapter_prefix, model, chunk_size, e)
                     continue
             
             # If we're here, this model failed entirely
             if model_idx < len(model_list) - 1:
-                logger.info("Model %s failed entirely, trying next model", model)
+                logger.info("%sModel %s failed entirely, trying next model", chapter_prefix, model)
                 continue
             else:
-                logger.error("All models failed")
+                logger.error("%sAll models failed", chapter_prefix)
                 raise TranslationError(f"All models ({', '.join(model_list)}) failed")
     
     # Should never reach here
     raise TranslationError("All models failed")
 
 
-def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: bool = False) -> str:
+def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: bool = False, 
+                   chapter_info: str = None, chunk_info: str = None) -> str:
     """
     Make a single translation request. No retries - if it fails, let the caller handle it.
+    
+    Args:
+        api_base: API base URL
+        model: Model name
+        prompt: Translation prompt
+        block: Content to translate
+        debug: Enable debug logging
+        chapter_info: Optional chapter context (e.g., "Chapter 1/5")
+        chunk_info: Optional chunk context (e.g., "Chunk 1/5")
     """
     url = api_base.rstrip('/') + '/api/chat'
+    
+    # Create context prefix for logging
+    context_prefix = ""
+    if chapter_info:
+        context_prefix += chapter_info
+        if chunk_info:
+            context_prefix += f" {chunk_info}"
+        context_prefix += " "
+    elif chunk_info:
+        context_prefix = f"{chunk_info} "
     
     payload = {
         'model': model,
@@ -204,16 +241,21 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             'payload': payload,
             'model': model,
             'api_base': api_base,
-            'block_length': len(block)
+            'block_length': len(block),
+            'context': {
+                'chapter': chapter_info,
+                'chunk': chunk_info
+            }
         }
         try:
             with open('debug-lastcall.json', 'w', encoding='utf-8') as f:
                 json.dump(debug_data, f, indent=2, ensure_ascii=False)
         except Exception as debug_err:
-            logger.warning("Failed to write debug-lastcall.json: %s", debug_err)
+            logger.warning("%sFailed to write debug-lastcall.json: %s", context_prefix, debug_err)
     
     try:
-        logger.debug("Making translation request with model %s, block length: %d chars", model, len(block))
+        logger.debug("%sMaking translation request with model %s, block length: %d chars", 
+                    context_prefix, model, len(block))
         resp = requests.post(url, json=payload, timeout=300)
         
         # Update debug file with response if debug mode is enabled
@@ -236,7 +278,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
                 with open('debug-lastcall.json', 'w', encoding='utf-8') as f:
                     json.dump(debug_data, f, indent=2, ensure_ascii=False)
             except Exception as debug_err:
-                logger.warning("Failed to update debug-lastcall.json with response: %s", debug_err)
+                logger.warning("%sFailed to update debug-lastcall.json with response: %s", context_prefix, debug_err)
         
         resp.raise_for_status()
         
@@ -258,18 +300,18 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             valid, err = validate_translation(block, content)
             
             if not valid:
-                logger.debug("Validation failed: %s", err)
-                logger.debug("Original has <p tags: %s, Translation has <p tags: %s", 
-                           '<p' in block, '<p' in content)
+                logger.debug("%sValidation failed: %s", context_prefix, err)
+                logger.debug("%sOriginal has <p tags: %s, Translation has <p tags: %s", 
+                           context_prefix, '<p' in block, '<p' in content)
                 raise TranslationError(f"Translation validation failed: {err}")
             
-            logger.debug("Translation successful, content length: %d chars", len(content))
+            logger.debug("%sTranslation successful, content length: %d chars", context_prefix, len(content))
             return content
             
         except (KeyError, ValueError, TypeError) as json_err:
-            logger.error("JSON parsing/structure error: %s", json_err)
+            logger.error("%sJSON parsing/structure error: %s", context_prefix, json_err)
             raise TranslationError(f"Invalid API response: {json_err}")
             
     except Exception as e:
-        logger.error("Translation request failed: %s", e)
+        logger.error("%sTranslation request failed: %s", context_prefix, e)
         raise TranslationError(f"Translation failed: {e}")

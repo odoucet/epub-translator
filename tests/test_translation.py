@@ -239,7 +239,7 @@ class TestTranslateWithChunking:
         html = "<p>Original content</p>"
         progress = {}
         
-        result, model_used = translate_with_chunking(api_base, model, prompt, html, progress)
+        result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, chapter_info="Chapter 1/5")
         assert result == "<p>Translated content</p>"
         assert model_used == model
         mock_translate.assert_called_once()
@@ -265,7 +265,7 @@ class TestTranslateWithChunking:
         html = "<p>" + "Large content. " * 500 + "</p>"
         progress = {}
         
-        result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, debug=False)
+        result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, debug=False, chapter_info="Chapter 1/5")
         
         # Should contain content from chunks
         assert "Chunk 1 translated" in result or "Chunk 2 translated" in result or "Chunk 3 translated" in result
@@ -291,7 +291,7 @@ class TestTranslateWithChunking:
         html = "<p>Content</p>"
         progress = {'chunk_parts': 4}  # Existing chunk info
         
-        result, model_used = translate_with_chunking(api_base, model, prompt, html, progress)
+        result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, chapter_info="Chapter 1/5")
         assert "Translated chunk" in result
         assert model_used == model
     
@@ -308,4 +308,4 @@ class TestTranslateWithChunking:
         progress = {}
         
         with pytest.raises(TranslationError):
-            result, model_used = translate_with_chunking(api_base, model, prompt, html, progress)
+            result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, chapter_info="Chapter 1/5")

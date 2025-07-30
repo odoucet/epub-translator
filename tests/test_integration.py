@@ -107,7 +107,7 @@ class TestTranslationWorkflow:
             ]
             
             result, model_used = translate_with_chunking(
-                api_base, "test-model", "Test prompt", large_html, progress
+                api_base, "test-model", "Test prompt", large_html, progress, chapter_info="Chapter 1/5"
             )
             
             # Verify chunked translation result
@@ -212,7 +212,7 @@ class TestErrorHandlingWorkflow:
             with pytest.raises(TranslationError):
                 result, model_used = translate_with_chunking(
                     "http://localhost:11434", "test-model", 
-                    "prompt", "<p>content</p>", progress
+                    "prompt", "<p>content</p>", progress, chapter_info="Chapter 1/5"
                 )
     
     def test_file_handling_errors(self, temp_dir):
