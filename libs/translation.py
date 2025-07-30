@@ -227,23 +227,31 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     logger.debug("%sStarting translate_with_chunking: html length=%d chars, models=%s", 
                 chapter_prefix, len(html), model_list)
     
+    # Extract HTML structure to avoid sending XML/DOCTYPE/head to model
+    prefix, body_content, suffix = extract_html_structure(html)
+    logger.debug("%sExtracted structure: prefix=%d chars, body=%d chars, suffix=%d chars", 
+                chapter_prefix, len(prefix), len(body_content), len(suffix))
+    
     # Try each model in sequence
     for model_idx, model in enumerate(model_list):
         logger.debug("%sTrying model %s (%d/%d)", chapter_prefix, model, model_idx + 1, len(model_list))
         
         try:
-            # Try full translation first
+            # Try full translation first - only send body content
             logger.debug("%sAttempting full translation with %s", chapter_prefix, model)
-            result = _translate_once(api_base, model, prompt, html, debug, chapter_info)
+            translated_body = _translate_once(api_base, model, prompt, body_content, debug, chapter_info)
+            
+            # Wrap the translated body with the original HTML structure
+            full_translated = wrap_html_content(translated_body, prefix, suffix)
             logger.debug("%sFull translation successful with %s", chapter_prefix, model)
-            return result, model
+            return full_translated, model
             
         except TranslationError as e:
             logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model, e)
             
             # Try chunking with progressively halved sizes
-            # Start with content size and halve until we get manageable chunks
-            initial_size = len(html)
+            # Start with body content size and halve until we get manageable chunks
+            initial_size = len(body_content)
             chunk_size = min(initial_size // 2, 16000)  # Start with half the content or 16k, whichever is smaller
             min_chunk_size = 2000  # Don't go below 2k characters
             
@@ -253,10 +261,12 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                     chunk_size = chunk_size // 2
                     continue
                     
-                logger.debug("%sTrying chunking with %s, chunk size %d (content size: %d)", 
+                logger.debug("%sTrying chunking with %s, chunk size %d (body content size: %d)", 
                            chapter_prefix, model, chunk_size, initial_size)
                 try:
-                    chunks = smart_html_split_with_structure(html, chunk_size)
+                    # Split only the body content, then wrap each chunk
+                    body_chunks = smart_html_split(body_content, chunk_size)
+                    chunks = [wrap_html_content(body_chunk, prefix, suffix) for body_chunk in body_chunks]
                     logger.debug("%sCreated %d chunks of target size %d with %s", chapter_prefix, len(chunks), chunk_size, model)
                     
                     translated_chunks = []
@@ -267,8 +277,12 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                         logger.debug("%sTranslating chunk %d/%d with %s (length: %d chars)", 
                                    chapter_prefix, i+1, len(chunks), model, len(chunk))
                         try:
-                            translated_chunk = _translate_once(api_base, model, prompt, chunk, debug, 
-                                                             chapter_info, f"Chunk {i+1}/{len(chunks)}")
+                            # Extract body from this chunk to send to model
+                            _, chunk_body, _ = extract_html_structure(chunk)
+                            translated_body = _translate_once(api_base, model, prompt, chunk_body, debug, 
+                                                           chapter_info, f"Chunk {i+1}/{len(chunks)}")
+                            # Wrap the translated body with the original structure
+                            translated_chunk = wrap_html_content(translated_body, prefix, suffix)
                             translated_chunks.append(translated_chunk)
                             logger.debug("%sChunk %d/%d translation successful with %s", 
                                        chapter_prefix, i+1, len(chunks), model)
@@ -287,9 +301,19 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                                 break
                     
                     if not chunk_failed:
-                        # All chunks successful - merge results
+                        # All chunks successful - merge body content and wrap once
                         logger.debug("%sAll chunks translated successfully with %s, merging results", chapter_prefix, model)
-                        result = ''.join(translated_chunks)
+                        
+                        # Extract body content from each translated chunk and merge
+                        merged_body_parts = []
+                        for translated_chunk in translated_chunks:
+                            _, chunk_body, _ = extract_html_structure(translated_chunk)
+                            merged_body_parts.append(chunk_body)
+                        
+                        # Merge all body parts and wrap with original structure
+                        merged_body = ''.join(merged_body_parts)
+                        result = wrap_html_content(merged_body, prefix, suffix)
+                        
                         logger.debug("%sChunked translation completed successfully with %s", chapter_prefix, model)
                         # Update progress with chunk information
                         progress['chunk_parts'] = len(chunks)
@@ -423,6 +447,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
                 logger.debug("%sValidation failed: %s", context_prefix, err)
                 logger.debug("%sOriginal has <p> tags: %d, Translation has <p> tags: %d", 
                            context_prefix, block.count('<p>'), content.count('<p>'))
+                raise TranslationError(f"Translation validation failed: {err}")
             
             logger.debug("%sTranslation successful, content length: %d chars", context_prefix, len(content))
             return content
