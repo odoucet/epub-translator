@@ -132,14 +132,20 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
         except TranslationError as e:
             logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model, e)
             
-            # Try chunking with progressively smaller sizes
-            chunk_sizes = [16000, 12000, 8000, 4000]
+            # Try chunking with progressively halved sizes
+            # Start with content size and halve until we get manageable chunks
+            initial_size = len(html)
+            chunk_size = min(initial_size // 2, 16000)  # Start with half the content or 16k, whichever is smaller
+            min_chunk_size = 2000  # Don't go below 2k characters
             
-            for chunk_size in chunk_sizes:
-                if len(html) <= chunk_size:
-                    continue  # Skip if content is already smaller than chunk size
+            while chunk_size >= min_chunk_size:
+                if chunk_size >= initial_size:
+                    # If chunk size is larger than content, reduce and try again
+                    chunk_size = chunk_size // 2
+                    continue
                     
-                logger.debug("%sTrying chunking with %s, chunk size %d", chapter_prefix, model, chunk_size)
+                logger.debug("%sTrying chunking with %s, chunk size %d (content size: %d)", 
+                           chapter_prefix, model, chunk_size, initial_size)
                 try:
                     chunks = smart_html_split(html, chunk_size)
                     logger.debug("%sCreated %d chunks of target size %d with %s", chapter_prefix, len(chunks), chunk_size, model)
@@ -160,14 +166,14 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                         except TranslationError as chunk_error:
                             logger.warning("%sChunk %d/%d translation failed with %s: %s", 
                                          chapter_prefix, i+1, len(chunks), model, chunk_error)
-                            # If chunk is small (< 8k) and still failing, try next model
-                            if len(chunk) < 8000 and model_idx < len(model_list) - 1:
-                                logger.info("%sChunk < 8k chars failed with %s, will try next model", 
+                            # If chunk is small (< 4k) and still failing, try next model
+                            if len(chunk) < 4000 and model_idx < len(model_list) - 1:
+                                logger.info("%sChunk < 4k chars failed with %s, will try next model", 
                                           chapter_prefix, model)
                                 chunk_failed = True
                                 break
                             else:
-                                # Try smaller chunks
+                                # Try smaller chunks by halving
                                 chunk_failed = True
                                 break
                     
@@ -176,14 +182,19 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                         logger.debug("%sAll chunks translated successfully with %s, merging results", chapter_prefix, model)
                         result = ''.join(translated_chunks)
                         logger.debug("%sChunked translation completed successfully with %s", chapter_prefix, model)
+                        # Update progress with chunk information
+                        progress['chunk_parts'] = len(chunks)
                         return result, model
-                    elif len(chunk) < 8000:
-                        # Small chunk failed, break to try next model
+                    elif len(chunks) > 0 and len(chunks[0]) < 4000:
+                        # Very small chunks failed, try next model
                         break
                         
                 except Exception as e:
                     logger.error("%sChunking with %s, size %d failed: %s", chapter_prefix, model, chunk_size, e)
-                    continue
+                
+                # Halve the chunk size for next iteration
+                chunk_size = chunk_size // 2
+                logger.debug("%sHalving chunk size to %d", chapter_prefix, chunk_size)
             
             # If we're here, this model failed entirely
             if model_idx < len(model_list) - 1:
