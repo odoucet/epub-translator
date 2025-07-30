@@ -64,6 +64,21 @@ def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
 def validate_translation(orig: str, trans: str) -> tuple[bool, str]:
     if not trans or len(trans.strip()) < 10:
         return False, "Translation too short"
+    
+    # Check if input starts with HTML tag and output should too
+    orig_stripped = orig.strip()
+    trans_stripped = trans.strip()
+    
+    if orig_stripped.startswith('<'):
+        # Find the first tag in original
+        first_tag_end = orig_stripped.find('>')
+        if first_tag_end > 0:
+            first_tag = orig_stripped[:first_tag_end + 1]
+            
+            # Translation should start with the same tag
+            if not trans_stripped.startswith(first_tag):
+                return False, f"Output should start with '{first_tag}' but starts with '{trans_stripped[:50]}...'"
+    
     if '<p' in orig and '<p' not in trans:
         return False, "Paragraph tags missing"
     try:
