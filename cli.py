@@ -100,7 +100,7 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
         raise ValueError(f"Chapter {chapter} not found")
     _, raw = chunks[0]
     html = raw.decode('utf-8')
-    translated_html = translate_with_chunking(url, model_name, prompt, html, {}, debug=debug)
+    translated_html, _ = translate_with_chunking(url, model_name, prompt, html, {}, debug=debug)
     translated_html, notes = convert_translator_notes_to_footnotes(translated_html)
     full_html = translated_html + ''.join(notes)
     plain = BeautifulSoup(full_html, 'html.parser').get_text(strip=True)
@@ -111,27 +111,20 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 def translate_with_fallback(models: list[str], prompt: str, url: str, html: str, 
                            progress: dict, debug: bool = False) -> tuple[str, str]:
     """
-    Try to translate with each model in sequence until one succeeds.
+    Translate using multiple models with intelligent chunking and fallback.
     Returns (translated_html, successful_model_name)
     """
     logger = logging.getLogger(__name__)
     
-    for i, model in enumerate(models):
-        try:
-            logger.info("Attempting translation with model %s (%d/%d)", model, i+1, len(models))
-            translated = translate_with_chunking(url, model, prompt, html, progress, debug=debug)
-            logger.info("✅ Translation successful with model %s", model)
-            return translated, model
-        except TranslationError as e:
-            logger.warning("❌ Model %s failed: %s", model, e)
-            if i == len(models) - 1:  # Last model
-                logger.error("All %d models failed. Translation unsuccessful.", len(models))
-                raise TranslationError(f"All {len(models)} models failed. Last error: {e}")
-            else:
-                logger.info("Trying next model...")
-    
-    # This should never be reached, but just in case
-    raise TranslationError("All models failed")
+    try:
+        logger.info("Starting translation with models: %s", ", ".join(models))
+        translated, successful_model = translate_with_chunking(url, models, prompt, html, progress, debug=debug)
+        logger.info("✅ Translation successful with model: %s", successful_model)
+        return translated, successful_model
+        
+    except TranslationError as e:
+        logger.error("❌ All models failed: %s", e)
+        raise e
 
 
 def write_markdown(out_file: Path, original: str, model_data: dict):
@@ -177,8 +170,8 @@ def main():
     parser = argparse.ArgumentParser(description="Translate EPUB or compare models on a chapter.")
     parser.add_argument('-f', '--file', required=True, help="Path to EPUB file")
     parser.add_argument('-l', '--lang', required=True, help="Target language")
-    parser.add_argument('-m', '--model', nargs='+', default=['mistral:7b', 'nous-hermes2'], 
-                       help="Model name(s) for translation - if multiple provided, will fallback in order")
+    parser.add_argument('-m', '--model', default='mistral:7b,nous-hermes2', 
+                       help="Model name(s) for translation - comma-separated list, will fallback in order (e.g., 'dorian2b/vera,mistral-small:24b')")
     parser.add_argument('-p', '--prompt-style', default='literary', help="Prompt style")
     parser.add_argument('-u', '--url', default='http://localhost:11434', help="API base URL")
     parser.add_argument('-w', '--workspace', default='.progress.json', help="Progress file")
@@ -189,6 +182,12 @@ def main():
     parser.add_argument('--compare', nargs='?', const='', help="Comma-separated models to compare (default all)")
     args = parser.parse_args()
 
+    # Parse comma-separated model names
+    if isinstance(args.model, str):
+        model_list = [m.strip() for m in args.model.split(',') if m.strip()]
+    else:
+        model_list = args.model
+    
     setup_logging(args.debug)
     logger = logging.getLogger(__name__)
 
@@ -249,7 +248,7 @@ def main():
         try:
             # Use fallback system with multiple models
             translated, successful_model = translate_with_fallback(
-                args.model, prompt, args.url, raw.decode('utf-8'), prog, debug=args.debug
+                model_list, prompt, args.url, raw.decode('utf-8'), prog, debug=args.debug
             )
             logger.info("✅ Chunk translated successfully with model: %s", successful_model)
             

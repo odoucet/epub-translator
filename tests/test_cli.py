@@ -146,7 +146,7 @@ class TestRunModelTranslation:
             (Mock(), b'<p>Original HTML content</p>')
         ]
         
-        mock_translate.return_value = '<p>Translated HTML content</p>'
+        mock_translate.return_value = ('<p>Translated HTML content</p>', 'test-model')
         mock_convert_notes.return_value = ('<p>Translated content</p>', [])
         
         result, elapsed = run_model_translation(
@@ -357,3 +357,93 @@ class TestDefaultModels:
             # Should not start or end with special characters
             assert not model.startswith("/"), f"Model name '{model}' starts with slash"
             assert not model.endswith("/"), f"Model name '{model}' ends with slash"
+
+
+class TestModelArgumentParsing:
+    """Test comma-separated model argument parsing."""
+    
+    def test_single_model_parsing(self):
+        """Test parsing a single model name."""
+        model_string = "mistral:7b"
+        model_list = [m.strip() for m in model_string.split(',') if m.strip()]
+        
+        assert model_list == ["mistral:7b"]
+        assert len(model_list) == 1
+    
+    def test_multiple_models_parsing(self):
+        """Test parsing comma-separated model names."""
+        model_string = "dorian2b/vera,mistral-small:24b,mistral:7b"
+        model_list = [m.strip() for m in model_string.split(',') if m.strip()]
+        
+        expected = ["dorian2b/vera", "mistral-small:24b", "mistral:7b"]
+        assert model_list == expected
+        assert len(model_list) == 3
+    
+    def test_models_with_spaces_parsing(self):
+        """Test parsing models with extra spaces."""
+        model_string = " dorian2b/vera , mistral:7b , nous-hermes2 "
+        model_list = [m.strip() for m in model_string.split(',') if m.strip()]
+        
+        expected = ["dorian2b/vera", "mistral:7b", "nous-hermes2"]
+        assert model_list == expected
+        assert len(model_list) == 3
+    
+    def test_empty_model_elements_filtered(self):
+        """Test that empty model elements are filtered out."""
+        model_string = "mistral:7b,,nous-hermes2,"
+        model_list = [m.strip() for m in model_string.split(',') if m.strip()]
+        
+        expected = ["mistral:7b", "nous-hermes2"]
+        assert model_list == expected
+        assert len(model_list) == 2
+    
+    def test_complex_model_names(self):
+        """Test parsing complex model names with various formats."""
+        model_string = "dorian2b/vera,gemma3:4b,mistral-small:24b,microsoft/DialoGPT-medium"
+        model_list = [m.strip() for m in model_string.split(',') if m.strip()]
+        
+        expected = ["dorian2b/vera", "gemma3:4b", "mistral-small:24b", "microsoft/DialoGPT-medium"]
+        assert model_list == expected
+        assert len(model_list) == 4
+        
+        # Verify no model names contain commas (our assumption)
+        for model in model_list:
+            assert "," not in model, f"Model name '{model}' contains comma"
+    
+    @patch('cli.setup_logging')
+    @patch('cli.translate_with_fallback')
+    @patch('cli.get_html_chunks')
+    @patch('cli.epub.read_epub')
+    def test_comma_separated_models_in_main(self, mock_read_epub, mock_get_chunks, 
+                                          mock_translate_fallback, mock_setup_logging):
+        """Test that comma-separated models work in the main function."""
+        test_args = [
+            "cli.py", "-f", "tests/andersen.epub", "-l", "en", 
+            "--model", "dorian2b/vera,mistral:7b", "--chapter", "1"
+        ]
+        
+        # Mock necessary components
+        mock_epub = Mock()
+        mock_read_epub.return_value = mock_epub
+        mock_get_chunks.return_value = [(Mock(), b'<p>Test content</p>')]
+        mock_translate_fallback.return_value = ("<p>Translated content</p>", "dorian2b/vera")
+        
+        with patch.object(sys, 'argv', test_args):
+            with patch('cli.load_progress', return_value={'translated': {}}):
+                with patch('cli.save_progress'):
+                    with patch('cli.inject_translations'):
+                        with patch('cli.epub.write_epub'):
+                            with patch('cli.convert_translator_notes_to_footnotes', return_value=("content", [])):
+                                with patch('cli.hash_key', return_value="test_key"):
+                                    try:
+                                        main()
+                                    except SystemExit:
+                                        pass
+                                    
+                                    # Verify translate_with_fallback was called with parsed model list
+                                    mock_translate_fallback.assert_called()
+                                    call_args = mock_translate_fallback.call_args[0]
+                                    models_used = call_args[0]  # First argument should be model list
+                                    
+                                    expected_models = ["dorian2b/vera", "mistral:7b"]
+                                    assert models_used == expected_models

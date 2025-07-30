@@ -106,13 +106,14 @@ class TestTranslationWorkflow:
                 "<body><p>Fourth chunk translated</p></body>"
             ]
             
-            result = translate_with_chunking(
+            result, model_used = translate_with_chunking(
                 api_base, "test-model", "Test prompt", large_html, progress
             )
             
             # Verify chunked translation result
             assert "First chunk translated" in result
             assert "Second chunk translated" in result
+            assert model_used == "test-model"
             assert "chunk_parts" in progress
     
     def test_epub_processing_workflow(self, temp_dir):
@@ -209,7 +210,7 @@ class TestErrorHandlingWorkflow:
             mock_translate.side_effect = TranslationError("All failed")
             
             with pytest.raises(TranslationError):
-                translate_with_chunking(
+                result, model_used = translate_with_chunking(
                     "http://localhost:11434", "test-model", 
                     "prompt", "<p>content</p>", progress
                 )

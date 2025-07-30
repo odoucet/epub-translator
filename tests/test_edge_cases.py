@@ -309,7 +309,7 @@ class TestIntegrationErrorScenarios:
             
             # Should raise error when chunking also fails
             with pytest.raises(TranslationError):
-                translate_with_chunking(
+                result, model_used = translate_with_chunking(
                     "http://localhost:11434", "model", "prompt", 
                     "<p>Large content</p>" * 1000, progress
                 )
