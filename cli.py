@@ -211,9 +211,11 @@ def main():
         chapter_title, word_count = get_chapter_info(Path(args.file), args.chapter)
         
         outputs = {}
+        logger.info("🔍 Starting model comparison for chapter %d: '%s' (%d words)", 
+                   args.chapter, chapter_title, word_count)
+        
         for model in models:
-            logger.info("Translating chapter %d ('%s', %d words) with model %s", 
-                       args.chapter, chapter_title, word_count, model)
+            logger.info("[Chapter %d] 🤖 Translating with model %s...", args.chapter, model)
             try:
                 content, elapsed = run_model_translation(
                     model, args.chapter, args.lang, Path(args.file), prompt, args.url, debug=args.debug
@@ -263,11 +265,17 @@ def main():
             bar.update()
             continue
         
-        # Create chapter context for this chunk
+        # Create chapter context for this chunk with title information
         if args.chapter:
             chapter_info = chapter_prefix
         else:
+            # Get chapter title for better context in debug mode
+            chapter_title, _ = get_chapter_info(Path(args.file), chunk_idx + 1)
             chapter_info = f"Chapter {chunk_idx + 1}/{total_chapters}"
+            
+            if args.debug:
+                logger.info("📖 Processing chapter %d/%d: '%s'", 
+                           chunk_idx + 1, total_chapters, chapter_title)
             
         try:
             # Use fallback system with multiple models
