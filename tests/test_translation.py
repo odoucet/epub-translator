@@ -46,7 +46,8 @@ class TestValidateTranslation:
         
         is_valid, error = validate_translation(original, translation)
         assert is_valid is False
-        assert "paragraph tags missing" in error.lower()
+        # New validation checks HTML structure first, so expect HTML structure error
+        assert ("output should start with" in error.lower() or "paragraph tags missing" in error.lower())
     
     def test_invalid_html(self):
         """Test validation fails for invalid HTML."""

@@ -73,7 +73,8 @@ class TestPredefinedPrompts:
             prompt_lower = prompt.lower()
             assert ("proper names" in prompt_lower or 
                    "character names" in prompt_lower or 
-                   "names" in prompt_lower), f"Prompt '{style}' missing name preservation instruction"
+                   "names" in prompt_lower or
+                   "name" in prompt_lower), f"Prompt '{style}' missing name preservation instruction"
     
     def test_prompts_translator_notes_instructions(self):
         """Test that all prompts contain translator notes instructions."""

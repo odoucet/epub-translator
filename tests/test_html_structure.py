@@ -251,6 +251,68 @@ class TestHtmlStructure(unittest.TestCase):
         # while old approach would add generic structure to each chunk
         # This test verifies the concept works
         self.assertGreater(len(chunks), 1)  # Main verification: we can create structured chunks
+    
+    def test_smart_html_split_never_cuts_words(self):
+        """Test that smart_html_split never cuts words or content in half."""
+        # Create content with a specific pattern that could be cut badly
+        problematic_content = '''<p>The Word started with a standard-issue bomb—the 750-pound M-117, 638 of which already had been dropped unsuccessfully around the Thanh Hoa Bridge. He added a small set of wings that could direct the bomb.</p>
+<p>This is another paragraph with important content that should not be cut in the middle of a sentence or word.</p>
+<div>More content in a div that needs to be preserved properly.</div>'''
+        
+        # Split with a size that would normally cut in the middle
+        chunks = smart_html_split(problematic_content, target_size=200)
+        
+        # Verify multiple chunks were created
+        self.assertGreater(len(chunks), 1)
+        
+        # Verify each chunk ends with a complete HTML tag
+        for i, chunk in enumerate(chunks):
+            chunk = chunk.strip()
+            
+            # Should not end with partial words or broken HTML
+            self.assertFalse(chunk.endswith(' bo'), 
+                           f"Chunk {i} ends with partial word: {chunk[-50:]}")
+            self.assertFalse(chunk.endswith(' direct the bo'), 
+                           f"Chunk {i} cuts word in half: {chunk[-50:]}")
+            
+            # Should end with a complete HTML closing tag
+            if i < len(chunks) - 1:  # Not the last chunk
+                self.assertTrue(chunk.endswith('>'), 
+                              f"Chunk {i} doesn't end with complete tag: {chunk[-20:]}")
+                # Should end with a closing tag specifically
+                import re
+                self.assertTrue(re.search(r'</[^>]+>$', chunk), 
+                              f"Chunk {i} doesn't end with closing tag: {chunk[-50:]}")
+        
+        # Verify all content is preserved when chunks are recombined
+        combined = ''.join(chunks)
+        # Remove extra whitespace for comparison (allow minor whitespace differences)
+        import re
+        original_clean = re.sub(r'\s+', ' ', problematic_content).strip()
+        combined_clean = re.sub(r'\s+', ' ', combined).strip()
+        
+        # Check that content is roughly the same (allow for minor whitespace differences)
+        # The important thing is no words are cut in half
+        self.assertLess(abs(len(combined_clean) - len(original_clean)), 10, 
+                       "Content length should be approximately preserved")
+        
+        # More importantly, verify content integrity by checking key phrases are preserved
+        self.assertIn("750-pound M-117", combined_clean)
+        self.assertIn("Thanh Hoa Bridge", combined_clean)
+        self.assertIn("direct the bomb", combined_clean)  # This was being cut as "direct the bo"
+
+    def test_smart_html_split_handles_no_suitable_tags(self):
+        """Test behavior when no suitable splitting tags are found."""
+        # Content with no major block tags, only inline elements
+        inline_content = '''<span>Very long content with only span tags and no paragraph or div tags to split on, making it difficult to find good splitting points</span> <em>more emphasized content that continues without proper block elements</em> <strong>and strong content as well</strong>'''
+        
+        chunks = smart_html_split(inline_content, target_size=50)
+        
+        if len(chunks) > 1:
+            # If it did split, verify it found some tag boundary
+            for chunk in chunks[:-1]:  # All but last chunk
+                self.assertTrue(chunk.strip().endswith('>'), 
+                              f"Chunk should end with tag: {chunk[-20:]}")
 
 
 if __name__ == '__main__':
