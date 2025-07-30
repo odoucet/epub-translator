@@ -15,6 +15,9 @@ def setup_logging(debug: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    
+    # Suppress urllib3 debug messages even in debug mode
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
 
 

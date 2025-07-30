@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 import json
+import time
 from pathlib import Path
 from datetime import datetime
 import re
@@ -98,6 +99,11 @@ def dynamic_chunks(html: str, max_size: int = 10000, max_attempts: int = 10) -> 
     # Extract HTML structure
     prefix, body_content, suffix = extract_html_structure(html)
     
+    # If no structure found (simple HTML), create a basic wrapper
+    if not prefix and not suffix:
+        prefix = '<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html><head></head><body>'
+        suffix = '</body></html>'
+    
     total = len(body_content)
     for attempt in range(max_attempts):
         parts = 2 ** (attempt + 1)
@@ -126,36 +132,67 @@ def dynamic_chunks(html: str, max_size: int = 10000, max_attempts: int = 10) -> 
 def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
     """
     Split HTML at natural tag boundaries to create chunks of approximately target_size.
-    Now works with body content only - no HTML wrapper added.
+    Always splits at HTML tag boundaries - never cuts words or content in half.
     """
     if len(html) <= target_size:
         return [html]
     
-    # Try to split at major block elements
+    # Try to split at major block elements (in order of preference)
     major_tags = ['</p>', '</div>', '</section>', '</article>', '</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>']
     
     chunks = []
     remaining = html
     
     while len(remaining) > target_size:
-        # Find the best split point within target_size
-        best_split = target_size
+        best_split = None
+        best_distance = float('inf')
+        
+        # First, try to find a tag close to target_size (within reasonable range)
+        search_start = max(0, target_size - 1000)  # Look back up to 1000 chars
+        search_end = min(len(remaining), target_size + 1000)  # Look ahead up to 1000 chars
+        
         for tag in major_tags:
-            # Look for the tag within the target size range
-            search_start = max(0, target_size - 500)  # Look back up to 500 chars for a good split
-            search_end = min(len(remaining), target_size + 500)  # Look ahead up to 500 chars
-            
             tag_pos = remaining.find(tag, search_start, search_end)
             if tag_pos != -1:
                 tag_end = tag_pos + len(tag)
-                if abs(tag_end - target_size) < abs(best_split - target_size):
+                distance = abs(tag_end - target_size)
+                if distance < best_distance:
+                    best_distance = distance
                     best_split = tag_end
+        
+        # If no tag found in preferred range, find the first suitable tag after minimum size
+        if best_split is None:
+            min_chunk_size = max(1000, target_size // 4)  # Don't create chunks smaller than 1k or 1/4 target
+            for tag in major_tags:
+                tag_pos = remaining.find(tag, min_chunk_size)
+                if tag_pos != -1:
+                    best_split = tag_pos + len(tag)
+                    break
+        
+        # If still no tag found, find ANY closing tag after minimum size
+        if best_split is None:
+            min_chunk_size = max(1000, target_size // 4)
+            # Look for any closing tag
+            import re
+            tag_pattern = r'</[^>]+>'
+            match = re.search(tag_pattern, remaining[min_chunk_size:])
+            if match:
+                best_split = min_chunk_size + match.end()
+            else:
+                # Last resort: split at target_size but warn
+                logger.warning("No HTML tag found for splitting, forced to cut at position %d", target_size)
+                best_split = target_size
         
         # Extract chunk and update remaining
         chunk = remaining[:best_split].strip()
         if chunk:
             chunks.append(chunk)
         remaining = remaining[best_split:].strip()
+        
+        # Safety check to prevent infinite loops
+        if len(remaining) == len(html):
+            logger.error("Smart HTML split failed to make progress, falling back to simple split")
+            break
     
     # Add remaining content
     if remaining.strip():
@@ -277,6 +314,9 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                         logger.debug("%sTranslating chunk %d/%d with %s (length: %d chars)", 
                                    chapter_prefix, i+1, len(chunks), model, len(chunk))
                         try:
+                            # Track timing for this chunk
+                            chunk_start = time.time()
+                            
                             # Extract body from this chunk to send to model
                             _, chunk_body, _ = extract_html_structure(chunk)
                             translated_body = _translate_once(api_base, model, prompt, chunk_body, debug, 
@@ -284,8 +324,12 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                             # Wrap the translated body with the original structure
                             translated_chunk = wrap_html_content(translated_body, prefix, suffix)
                             translated_chunks.append(translated_chunk)
-                            logger.debug("%sChunk %d/%d translation successful with %s", 
-                                       chapter_prefix, i+1, len(chunks), model)
+                            
+                            # Calculate timing and speed
+                            chunk_elapsed = time.time() - chunk_start
+                            chars_per_min = int((len(chunk_body) * 60) / chunk_elapsed) if chunk_elapsed > 0 else 0
+                            logger.debug("%sChunk %d/%d ✅ %s - %.1fs (%d chars/min) - %d chars", 
+                                       chapter_prefix, i+1, len(chunks), model, chunk_elapsed, chars_per_min, len(translated_body))
                         except TranslationError as chunk_error:
                             logger.warning("%sChunk %d/%d translation failed with %s: %s", 
                                          chapter_prefix, i+1, len(chunks), model, chunk_error)
