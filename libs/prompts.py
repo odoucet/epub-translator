@@ -5,9 +5,14 @@ PREDEFINED_PROMPTS = {
         "but with a focus on capturing the literary style, emotional tone, and narrative rhythm of the original.\n\n"
         "##INSTRUCTIONS\n"
         "Absolutely NO summarising, condensing, or omitting.\n\n"
-        "Make the translation read as if it were originally written in the target language by a skilled novelist. "
-        "Preserve impact, imagery, and fluency.\nAt all cost, keep all HTML tags, structure, and attributes intact.\n"
+        "Make the translation read as if it were originally written in the target language by a skilled novelist.\n"
+        "Keep characters name in their original form unless the target language uses a different writing system (e.g., Chinese or Japanese).\n"
+        "Preserve impact, imagery, and fluency.\n"
+        "VERY IMPORTANT: ALWAYS KEEP ALL HTML tags, structure, and attributes intact.\n"
         "DO NOT confirm you understood the instructions, just start translating.\n"
+        "If you encounter culturally specific references that may confuse the reader, "
+        "add a brief translator's note in the form: [Translator's note: ...]. "
+        "Keep such notes rare and essential only. "
     ),
     
     "literary": (
