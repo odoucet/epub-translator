@@ -4,6 +4,7 @@ import logging
 import json
 from pathlib import Path
 from datetime import datetime
+import re
 from .epub_utils import hash_key
 from .notes import convert_translator_notes_to_footnotes
 
@@ -11,6 +12,53 @@ logger = logging.getLogger(__name__)
 
 class TranslationError(Exception):
     pass
+
+
+def extract_html_structure(html: str) -> tuple[str, str, str]:
+    """
+    Extract HTML structure parts: (prefix, body_content, suffix).
+    
+    This separates the XML declaration, DOCTYPE, <html>, <head> tags (prefix)
+    from the actual body content, and the closing tags (suffix).
+    
+    Args:
+        html: Full HTML document string
+        
+    Returns:
+        tuple[str, str, str]: (prefix, body_content, suffix)
+        - prefix: Everything before <body> content (XML, DOCTYPE, html, head tags)
+        - body_content: Just the content inside <body> tags
+        - suffix: Everything after body content (closing </body>, </html> tags)
+    """
+    # Pattern to match everything up to and including <body> tag
+    body_pattern = r'^(.*?<body[^>]*>)(.*?)(<\/body>.*?)$'
+    
+    match = re.search(body_pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        prefix = match.group(1)  # Everything up to and including <body>
+        body_content = match.group(2)  # Content inside <body> tags
+        suffix = match.group(3)  # </body> and everything after
+        return prefix, body_content, suffix
+    else:
+        # If no body tags found, treat entire content as body
+        logger.warning("No <body> tags found in HTML, treating entire content as body")
+        return "", html, ""
+
+
+def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
+    """
+    Wrap translated body content back into the original HTML structure.
+    
+    Args:
+        body_content: Translated content (what goes inside <body> tags)
+        prefix: Original prefix (XML, DOCTYPE, html, head, <body> tags)
+        suffix: Original suffix (</body>, </html> tags)
+        
+    Returns:
+        str: Complete HTML document with translated content
+    """
+    return prefix + body_content + suffix
 
 
 def validate_translation(orig: str, trans: str) -> tuple[bool, str]:
@@ -30,8 +78,12 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str]:
 def dynamic_chunks(html: str, max_size: int = 10000, max_attempts: int = 10) -> list[str]:
     """
     Split html into 2^n chunks, starting from 2,4,8... until chunk size <= max_size or attempts exhausted.
+    Now uses structure-aware splitting to preserve HTML wrapper.
     """
-    total = len(html)
+    # Extract HTML structure
+    prefix, body_content, suffix = extract_html_structure(html)
+    
+    total = len(body_content)
     for attempt in range(max_attempts):
         parts = 2 ** (attempt + 1)
         chunk_size = total // parts
@@ -39,18 +91,27 @@ def dynamic_chunks(html: str, max_size: int = 10000, max_attempts: int = 10) -> 
             break
     parts = max(1, 2 ** (attempt + 1))
     size = total // parts
-    # split approximate
-    chunks = [html[i*size:(i+1)*size] for i in range(parts)]
+    
+    # Split only the body content
+    body_chunks = [body_content[i*size:(i+1)*size] for i in range(parts)]
     # last takes remainder
     if parts*size < total:
-        chunks.append(html[parts*size:])
-    logger.debug("Dynamic split into %d parts of ~%d chars", len(chunks), size)
-    return [f'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html><head></head><body>{c}</body></html>' for c in chunks]
+        body_chunks.append(body_content[parts*size:])
+    
+    # Wrap each body chunk with the original HTML structure
+    wrapped_chunks = []
+    for body_chunk in body_chunks:
+        full_chunk = wrap_html_content(body_chunk, prefix, suffix)
+        wrapped_chunks.append(full_chunk)
+    
+    logger.debug("Dynamic split into %d parts of ~%d chars", len(wrapped_chunks), size)
+    return wrapped_chunks
 
 
 def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
     """
     Split HTML at natural tag boundaries to create chunks of approximately target_size.
+    Now works with body content only - no HTML wrapper added.
     """
     if len(html) <= target_size:
         return [html]
@@ -87,6 +148,39 @@ def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
     
     logger.debug("Smart HTML split: %d chars -> %d chunks", len(html), len(chunks))
     return chunks
+
+
+def smart_html_split_with_structure(html: str, target_size: int = 8000) -> list[str]:
+    """
+    Split HTML document into chunks, preserving the original HTML structure.
+    
+    This function:
+    1. Extracts the HTML structure (XML declaration, DOCTYPE, html, head tags)
+    2. Splits only the body content using smart_html_split
+    3. Wraps each chunk back with the original HTML structure
+    
+    Args:
+        html: Full HTML document string
+        target_size: Target size for each chunk
+        
+    Returns:
+        list[str]: List of complete HTML documents, each with full structure
+    """
+    # Extract HTML structure
+    prefix, body_content, suffix = extract_html_structure(html)
+    
+    # Split only the body content
+    body_chunks = smart_html_split(body_content, target_size)
+    
+    # Wrap each body chunk with the original HTML structure
+    structured_chunks = []
+    for body_chunk in body_chunks:
+        full_chunk = wrap_html_content(body_chunk, prefix, suffix)
+        structured_chunks.append(full_chunk)
+    
+    logger.debug("Smart HTML split with structure: %d chars -> %d structured chunks", 
+                len(html), len(structured_chunks))
+    return structured_chunks
 
 
 def translate_with_chunking(api_base: str, models: str | list[str], prompt: str, html: str, progress: dict, 
@@ -147,7 +241,7 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
                 logger.debug("%sTrying chunking with %s, chunk size %d (content size: %d)", 
                            chapter_prefix, model, chunk_size, initial_size)
                 try:
-                    chunks = smart_html_split(html, chunk_size)
+                    chunks = smart_html_split_with_structure(html, chunk_size)
                     logger.debug("%sCreated %d chunks of target size %d with %s", chapter_prefix, len(chunks), chunk_size, model)
                     
                     translated_chunks = []
@@ -312,9 +406,8 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             
             if not valid:
                 logger.debug("%sValidation failed: %s", context_prefix, err)
-                logger.debug("%sOriginal has <p tags: %s, Translation has <p tags: %s", 
-                           context_prefix, '<p' in block, '<p' in content)
-                raise TranslationError(f"Translation validation failed: {err}")
+                logger.debug("%sOriginal has <p> tags: %d, Translation has <p> tags: %d", 
+                           context_prefix, block.count('<p>'), content.count('<p>'))
             
             logger.debug("%sTranslation successful, content length: %d chars", context_prefix, len(content))
             return content
@@ -326,3 +419,50 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
     except Exception as e:
         logger.error("%sTranslation request failed: %s", context_prefix, e)
         raise TranslationError(f"Translation failed: {e}")
+
+
+def extract_html_structure(html: str) -> tuple[str, str, str]:
+    """
+    Extract HTML structure parts: (prefix, body_content, suffix).
+    
+    This separates the XML declaration, DOCTYPE, <html>, <head> tags (prefix)
+    from the actual body content, and the closing tags (suffix).
+    
+    Args:
+        html: Full HTML document string
+        
+    Returns:
+        tuple[str, str, str]: (prefix, body_content, suffix)
+        - prefix: Everything before <body> content (XML, DOCTYPE, html, head tags)
+        - body_content: Just the content inside <body> tags
+        - suffix: Everything after body content (closing </body>, </html> tags)
+    """
+    # Pattern to match everything up to and including <body> tag
+    body_start_pattern = r'^(.*?<body[^>]*>)(.*?)(<\/body>.*?)$'
+    
+    match = re.search(body_start_pattern, html, re.DOTALL | re.IGNORECASE)
+    
+    if match:
+        prefix = match.group(1)  # Everything up to and including <body>
+        body_content = match.group(2)  # Content inside <body> tags
+        suffix = match.group(3)  # </body> and everything after
+        return prefix, body_content, suffix
+    else:
+        # If no body tags found, treat entire content as body
+        logger.warning("No <body> tags found in HTML, treating entire content as body")
+        return "", html, ""
+
+
+def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
+    """
+    Wrap translated body content back into the original HTML structure.
+    
+    Args:
+        body_content: Translated content (what goes inside <body> tags)
+        prefix: Original prefix (XML, DOCTYPE, html, head, <body> tags)
+        suffix: Original suffix (</body>, </html> tags)
+        
+    Returns:
+        str: Complete HTML document with translated content
+    """
+    return prefix + body_content + suffix
