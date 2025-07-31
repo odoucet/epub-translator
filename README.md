@@ -80,14 +80,14 @@ The translator automatically detects and **blocks translation of DRM-protected E
 ## 🚀 Translate a Book
 
 ```bash
-python translate.py --file book.epub -l french --prompt-style literary --pdf
+python cli.py --file book.epub -l french --prompt-style literary --pdf
 ```
 
 Options:
 - `--chapter 3` → translate only chapter 3
 - `--workspace` → resume from previous translation progress
 - `--model mistral` → use a specific model
-- `--url http://localhost:11434/v1` → custom API endpoint
+- `--url http://localhost:11434` → custom API endpoint
 
 ---
 
@@ -96,28 +96,15 @@ Options:
 To compare model outputs on chapter 3:
 
 ```bash
-python compare_models.py book.epub -l french -p literary -m mistral gemma:2b -o model_comparison.md
+python cli.py --file book.epub -l french -p literary --compare gemma3:1b,mistral:7b --chapter 3 -o model_comparison.md
 ```
 
-Our own tests shows :
-* gemma3:1b : hard to keep html structure and follow prompt exactly
-* other gemma3 models: all timeout, to be investigated
-* mistral:7b : hard to keep html structure and follow prompt exactly
-* mistral-small:24b : good (but slow)
-* dorian2b/vera: works very well on small chunks.
-
-
-
----
-
-## 📁 Files Included
-
-- `translate.py` → full EPUB to EPUB/PDF translation
-- `compare_models.py` → compare model output for chapter 3
-- `prompts.py` → predefined translation prompt styles
-- `requirements.txt` → pip dependencies
-- `docker-compose.yml` / `Dockerfile` → for local container use
-- `download_models.sh` → fetch models via Ollama API
+Our own tests show:
+* **gemma3:1b**: hard to keep HTML structure and follow prompt exactly
+* **other gemma3 models**: all timeout, to be investigated
+* **mistral:7b**: hard to keep HTML structure and follow prompt exactly
+* **mistral-small:24b**: good (but slow)
+* **dorian2b/vera**: works very well on small chunks
 
 ---
 
@@ -133,13 +120,32 @@ You also need `pandoc` + `pdflatex` installed if using `--pdf`.
 
 ---
 
-## ✉️ Prompt Styles (in prompts.py)
+## ✉️ Prompt Styles
 
-- `literary`: expressive and narrative with optional translator notes
-- `elegant`: fluent and idiomatic with structure preservation
-- `narrative`: free but faithful rephrasing of content with tag retention
+Available prompt styles in `libs/prompts.py`:
+- **`literary-v2`**: enhanced literary style with stricter translation guidelines and no summarizing
+- **`literary`**: expressive and narrative with optional translator notes
+- **`elegant`**: fluent and idiomatic with structure preservation  
+- **`narrative`**: free but faithful rephrasing of content with tag retention
+
+---
+
+## 🧪 Testing
+
+Run the test suite:
+
+```bash
+pytest
+```
+
+Test specific functionality:
+```bash
+pytest tests/test_epub_utils.py::TestDRMDetection -v
+```
+
+---
 
 ## TODO
 - [ ] improve prompts to better handle HTML structure (lots of failures)
 - [ ] add openai-compatible API support
-- [ ] add "literal" translation.
+- [ ] add "literal" translation style
