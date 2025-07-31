@@ -17,37 +17,37 @@ class TestValidateTranslation:
         original = "<p>This is the original text.</p>"
         translation = "<p>Ceci est le texte traduit.</p>"
         
-        is_valid, error = validate_translation(original, translation)
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         assert is_valid is True
-        assert error == ""
+        assert cleaned_content == "<p>Ceci est le texte traduit.</p>"
     
     def test_empty_translation(self):
         """Test validation fails for empty translation."""
         original = "<p>Original text</p>"
         translation = ""
         
-        is_valid, error = validate_translation(original, translation)
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         assert is_valid is False
-        assert "too short" in error.lower()
+        assert "too short" in error_cleaned.lower()
     
     def test_very_short_translation(self):
         """Test validation fails for very short translation."""
         original = "<p>This is a longer original text with multiple words.</p>"
         translation = "Short"
         
-        is_valid, error = validate_translation(original, translation)
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         assert is_valid is False
-        assert "too short" in error.lower()
+        assert "too short" in error_cleaned.lower()
     
     def test_missing_paragraph_tags(self):
         """Test validation fails when paragraph tags are missing."""
         original = "<p>This text has paragraph tags.</p>"
         translation = "This text does not have paragraph tags."
         
-        is_valid, error = validate_translation(original, translation)
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         assert is_valid is False
         # New validation checks HTML structure first, so expect HTML structure error
-        assert ("output should start with" in error.lower() or "paragraph tags missing" in error.lower())
+        assert ("output should start with" in error_cleaned.lower() or "paragraph tags missing" in error_cleaned.lower())
     
     def test_invalid_html(self):
         """Test validation fails for invalid HTML."""
@@ -56,20 +56,20 @@ class TestValidateTranslation:
         
         # This might pass basic validation, but let's test with clearly broken HTML
         translation = "<p>Text with unclosed tag <"
-        is_valid, error = validate_translation(original, translation)
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         # The exact behavior depends on BeautifulSoup's error handling
         # At minimum, it should not crash
         assert isinstance(is_valid, bool)
-        assert isinstance(error, str)
+        assert isinstance(error_cleaned, str)
     
     def test_insufficient_text_after_parsing(self):
         """Test validation fails when parsed text is too short."""
         original = "<p>This is substantial original content with many words.</p>"
         translation = "<p></p>"  # Empty paragraph
         
-        is_valid, error = validate_translation(original, translation)
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         assert is_valid is False
-        assert "translation too short" in error.lower()
+        assert "translation too short" in error_cleaned.lower()
 
 
 class TestDynamicChunks:
@@ -313,3 +313,79 @@ class TestTranslateWithChunking:
         
         with pytest.raises(TranslationError):
             result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, chapter_info="Chapter 1/5")
+
+
+class TestBackticksHandling:
+    """Test backticks cleaning in translation validation."""
+    
+    def test_single_backticks_cleaned(self):
+        """Test that single backticks are properly removed."""
+        original = "<p>Bonjour le monde</p>"
+        translation = "`<p>Hello world</p>`"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>Hello world</p>"
+    
+    def test_triple_backticks_cleaned(self):
+        """Test that triple backticks are properly removed."""
+        original = "<p>Bonjour le monde</p>"
+        translation = "```<p>Hello world</p>```"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>Hello world</p>"
+    
+    def test_triple_backticks_with_language_identifier(self):
+        """Test that triple backticks with language identifier are properly handled."""
+        original = "<p>Bonjour le monde</p>"
+        translation = "```html\n<p>Hello world</p>\n```"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>Hello world</p>"
+    
+    def test_triple_backticks_multiline(self):
+        """Test that multiline content in triple backticks is properly handled."""
+        original = "<p>Bonjour le monde</p>"
+        translation = "```\n<p>Hello world</p>\n```"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>Hello world</p>"
+    
+    def test_no_backticks_unchanged(self):
+        """Test that content without backticks remains unchanged."""
+        original = "<p>Bonjour le monde</p>"
+        translation = "<p>Hello world</p>"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>Hello world</p>"
+    
+    def test_backticks_with_invalid_content(self):
+        """Test that backticks are removed but validation still fails for invalid content."""
+        original = "<p>Bonjour le monde</p>"
+        translation = "`Hello world without tags`"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is False
+        assert "Output should start with '<p>'" in error_cleaned
+    
+    def test_complex_html_with_backticks(self):
+        """Test complex HTML content wrapped in backticks."""
+        original = "<p>Texte avec <em>emphase</em> et <strong>gras</strong>.</p>"
+        translation = "```<p>Text with <em>emphasis</em> and <strong>bold</strong>.</p>```"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>Text with <em>emphasis</em> and <strong>bold</strong>.</p>"
+    
+    def test_multiple_paragraphs_with_backticks(self):
+        """Test multiple paragraphs wrapped in backticks."""
+        original = "<p>Premier paragraphe.</p><p>Deuxième paragraphe.</p>"
+        translation = "```\n<p>First paragraph.</p><p>Second paragraph.</p>\n```"
+        
+        is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
+        assert is_valid is True
+        assert cleaned_content == "<p>First paragraph.</p><p>Second paragraph.</p>"
