@@ -12,7 +12,7 @@ from tqdm import tqdm
 from libs.epub_utils import (
     normalize_language, load_progress, save_progress,
     get_html_chunks, inject_translations, hash_key,
-    setup_logging
+    setup_logging, detect_drm, DRM_NONE
 )
 from libs.translation import translate_with_chunking, TranslationError
 from libs.notes import convert_translator_notes_to_footnotes
@@ -196,6 +196,16 @@ def main():
     
     setup_logging(args.debug)
     logger = logging.getLogger(__name__)
+
+    # Vérification DRM avant de commencer la traduction
+    logger.info("🔒 Vérification DRM du fichier EPUB...")
+    drm_status = detect_drm(args.file)
+    if drm_status != DRM_NONE:
+        logger.error("❌ DRM détecté: %s", drm_status)
+        logger.error("❌ Impossible de traduire un fichier EPUB protégé par DRM")
+        logger.error("💡 Veuillez utiliser un fichier EPUB sans DRM")
+        return 1
+    logger.info("✅ Aucun DRM détecté, traduction autorisée")
 
     prompt = PREDEFINED_PROMPTS[args.prompt_style].format(target_language=args.lang)
 

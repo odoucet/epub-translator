@@ -2,6 +2,9 @@ import logging
 from pathlib import Path
 import json
 import hashlib
+import zipfile
+import xml.etree.ElementTree as ET
+import re
 from ebooklib import epub
 import ebooklib
 from bs4 import BeautifulSoup
@@ -18,6 +21,52 @@ def setup_logging(debug: bool = False) -> None:
     
     # Suppress urllib3 debug messages even in debug mode
     logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+
+# DRM Detection Constants
+DRM_NONE = "Aucun DRM détecté"
+DRM_UNKNOWN = "Ressources chiffrées (type indéterminé)"
+DRM_LCP = "Readium LCP"
+DRM_ADOBE = "Adobe ADEPT"
+DRM_BN = "Barnes & Noble"
+DRM_FAIRPLAY = "Apple FairPlay"
+
+
+def detect_drm(epub_path: str) -> str:
+    """Retourne une chaîne décrivant le DRM détecté (ou DRM_NONE)."""
+    with zipfile.ZipFile(epub_path) as z:
+        names = set(z.namelist())
+
+        # 1. LCP
+        if "license.lcpl" in names or "META-INF/license.lcpl" in names:
+            return DRM_LCP
+
+        # 2. Adobe / B&N / FairPlay via rights.xml + encryption.xml
+        if "META-INF/rights.xml" in names:
+            rights = z.read("META-INF/rights.xml")
+            # Heuristique B&N : clé chiffrée de 78 octets
+            if re.search(rb"<encryptedKey>.{78}</encryptedKey>", rights, re.S):
+                return DRM_BN
+            # Heuristique Adobe : clé de 186 octets
+            if re.search(rb"<encryptedKey>.{186}</encryptedKey>", rights, re.S):
+                return DRM_ADOBE
+
+        if "META-INF/encryption.xml" in names:
+            enc_root = ET.fromstring(z.read("META-INF/encryption.xml"))
+            algos = [m.get("Algorithm", "") for m in enc_root.iter("{http://www.w3.org/2001/04/xmlenc#}EncryptionMethod")]
+            algo_str = "|".join(algos).lower()
+            if "adept" in algo_str or "adobe" in algo_str:
+                return DRM_ADOBE
+            if "fairplay" in algo_str:
+                return DRM_FAIRPLAY
+            # Chiffrement sans droits.xml : peut être un DRM exotique ou de simples polices
+            return DRM_UNKNOWN
+
+        # 3. Apple FairPlay repéré par sinf.xml même sans encryption.xml
+        if any(name.endswith(".sinf") or "sinf.xml" in name for name in names):
+            return DRM_FAIRPLAY
+
+    return DRM_NONE
 
 
 
