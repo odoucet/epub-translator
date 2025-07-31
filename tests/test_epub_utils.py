@@ -1,12 +1,15 @@
 import pytest
 import json
+import zipfile
+import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 import hashlib
 
 from libs.epub_utils import (
     normalize_language, hash_key, load_progress, save_progress,
-    get_html_chunks, inject_translations, setup_logging
+    get_html_chunks, inject_translations, setup_logging,
+    detect_drm, DRM_NONE, DRM_LCP, DRM_ADOBE, DRM_BN, DRM_FAIRPLAY, DRM_UNKNOWN
 )
 
 
@@ -335,3 +338,195 @@ class TestSetupLogging:
         mock_basic_config.assert_called_once()
         call_args = mock_basic_config.call_args
         assert call_args[1]['level'] == 20  # logging.INFO
+
+
+class TestDRMDetection:
+    """Test DRM detection functionality."""
+    
+    def create_test_epub(self, temp_dir: Path, drm_files: dict = None) -> Path:
+        """Create a test EPUB file with optional DRM files."""
+        epub_path = temp_dir / "test.epub"
+        
+        with zipfile.ZipFile(epub_path, 'w') as zf:
+            # Basic EPUB structure
+            zf.writestr("mimetype", "application/epub+zip")
+            zf.writestr("META-INF/container.xml", """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+    <rootfiles>
+        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+    </rootfiles>
+</container>""")
+            
+            # Add DRM files if specified
+            if drm_files:
+                for file_path, content in drm_files.items():
+                    if isinstance(content, str):
+                        zf.writestr(file_path, content)
+                    else:
+                        zf.writestr(file_path, content)
+        
+        return epub_path
+    
+    def test_no_drm_detected(self, temp_dir):
+        """Test detection when no DRM is present."""
+        epub_path = self.create_test_epub(temp_dir)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_NONE
+    
+    def test_lcp_drm_detection_license_lcpl(self, temp_dir):
+        """Test detection of Readium LCP DRM with license.lcpl."""
+        drm_files = {
+            "license.lcpl": '{"license": "lcp_license_content"}'
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_LCP
+    
+    def test_lcp_drm_detection_meta_inf_license(self, temp_dir):
+        """Test detection of Readium LCP DRM with META-INF/license.lcpl."""
+        drm_files = {
+            "META-INF/license.lcpl": '{"license": "lcp_license_content"}'
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_LCP
+    
+    def test_barnes_noble_drm_detection(self, temp_dir):
+        """Test detection of Barnes & Noble DRM with 78-byte encrypted key."""
+        rights_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rights>
+    <encryptedKey>""" + b"x" * 78 + b"""</encryptedKey>
+</rights>"""
+        drm_files = {
+            "META-INF/rights.xml": rights_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_BN
+    
+    def test_adobe_drm_detection_via_rights(self, temp_dir):
+        """Test detection of Adobe ADEPT DRM with 186-byte encrypted key."""
+        rights_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rights>
+    <encryptedKey>""" + b"x" * 186 + b"""</encryptedKey>
+</rights>"""
+        drm_files = {
+            "META-INF/rights.xml": rights_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_ADOBE
+    
+    def test_adobe_drm_detection_via_encryption_xml(self, temp_dir):
+        """Test detection of Adobe ADEPT DRM via encryption.xml algorithms."""
+        encryption_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="http://www.w3.org/2001/04/xmlenc#">
+    <EncryptedData>
+        <EncryptionMethod Algorithm="http://www.adobe.com/adept"/>
+    </EncryptedData>
+</encryption>"""
+        drm_files = {
+            "META-INF/encryption.xml": encryption_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_ADOBE
+    
+    def test_fairplay_drm_detection_via_encryption_xml(self, temp_dir):
+        """Test detection of Apple FairPlay DRM via encryption.xml algorithms."""
+        encryption_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="http://www.w3.org/2001/04/xmlenc#">
+    <EncryptedData>
+        <EncryptionMethod Algorithm="http://www.apple.com/fairplay"/>
+    </EncryptedData>
+</encryption>"""
+        drm_files = {
+            "META-INF/encryption.xml": encryption_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_FAIRPLAY
+    
+    def test_fairplay_drm_detection_via_sinf(self, temp_dir):
+        """Test detection of Apple FairPlay DRM via sinf.xml files."""
+        drm_files = {
+            "META-INF/sinf.xml": "<?xml version='1.0'?><sinf></sinf>"
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_FAIRPLAY
+    
+    def test_fairplay_drm_detection_via_sinf_extension(self, temp_dir):
+        """Test detection of Apple FairPlay DRM via .sinf file extension."""
+        drm_files = {
+            "OEBPS/fonts/font.sinf": "binary_sinf_data"
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_FAIRPLAY
+    
+    def test_unknown_drm_detection(self, temp_dir):
+        """Test detection of unknown encrypted content."""
+        encryption_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="http://www.w3.org/2001/04/xmlenc#">
+    <EncryptedData>
+        <EncryptionMethod Algorithm="http://example.com/unknown-drm"/>
+    </EncryptedData>
+</encryption>"""
+        drm_files = {
+            "META-INF/encryption.xml": encryption_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_UNKNOWN
+    
+    def test_lcp_takes_precedence(self, temp_dir):
+        """Test that LCP detection takes precedence over other DRM types."""
+        encryption_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="http://www.w3.org/2001/04/xmlenc#">
+    <EncryptedData>
+        <EncryptionMethod Algorithm="http://www.adobe.com/adept"/>
+    </EncryptedData>
+</encryption>"""
+        drm_files = {
+            "license.lcpl": '{"license": "lcp_license_content"}',
+            "META-INF/encryption.xml": encryption_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_LCP
+    
+    def test_rights_xml_precedence_over_encryption_xml(self, temp_dir):
+        """Test that rights.xml detection takes precedence over encryption.xml."""
+        rights_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rights>
+    <encryptedKey>""" + b"x" * 186 + b"""</encryptedKey>
+</rights>"""
+        encryption_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<encryption xmlns="http://www.w3.org/2001/04/xmlenc#">
+    <EncryptedData>
+        <EncryptionMethod Algorithm="http://www.apple.com/fairplay"/>
+    </EncryptedData>
+</encryption>"""
+        drm_files = {
+            "META-INF/rights.xml": rights_xml,
+            "META-INF/encryption.xml": encryption_xml
+        }
+        epub_path = self.create_test_epub(temp_dir, drm_files)
+        result = detect_drm(str(epub_path))
+        assert result == DRM_ADOBE
+    
+    def test_invalid_epub_file(self, temp_dir):
+        """Test behavior with invalid or non-existent EPUB file."""
+        non_existent = temp_dir / "nonexistent.epub"
+        
+        with pytest.raises(FileNotFoundError):
+            detect_drm(str(non_existent))
+    
+    def test_corrupted_zip_file(self, temp_dir):
+        """Test behavior with corrupted ZIP file."""
+        corrupted_epub = temp_dir / "corrupted.epub"
+        corrupted_epub.write_text("This is not a valid ZIP file")
+        
+        with pytest.raises(zipfile.BadZipFile):
+            detect_drm(str(corrupted_epub))

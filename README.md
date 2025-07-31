@@ -24,6 +24,43 @@ It preserves HTML structure (headers, emphasis, lists), supports translator foot
 
 ---
 
+## 🔒 DRM Protection Check
+
+The translator automatically detects and **blocks translation of DRM-protected EPUB files** to ensure compliance with digital rights.
+
+**Supported DRM detection:**
+- ✅ **Readium LCP** (license.lcpl)
+- ✅ **Adobe ADEPT** (rights.xml with Adobe algorithms)
+- ✅ **Barnes & Noble** (characteristic encrypted keys)
+- ✅ **Apple FairPlay** (sinf.xml signatures)
+- ✅ **Unknown encrypted content** (generic encryption detection)
+
+**What happens if DRM is detected:**
+```
+🔒 Vérification DRM du fichier EPUB...
+❌ DRM détecté: Adobe ADEPT
+❌ Impossible de traduire un fichier EPUB protégé par DRM
+💡 Veuillez utiliser un fichier EPUB sans DRM
+```
+
+**How to get DRM-free EPUBs:**
+- **Public domain sources:**
+  - 🇺🇸 **English**: [Project Gutenberg](https://www.gutenberg.org) (60,000+ free books)
+  - 🇫🇷 **French**: [Ebooks Gratuits](https://www.ebooksgratuits.com) • [BnR](https://ebooks-bnr.com)
+  - 🇩🇪 **German**: [Projekt Gutenberg-DE](https://www.projekt-gutenberg.org)
+  - 🇪🇸 **Spanish**: [Biblioteca Digital Ciudad Seva](http://www.ciudadseva.com)
+  - 🌍 **Multi-language**: [Internet Archive](https://archive.org/details/texts) • [Wikisource](https://wikisource.org)
+- **Commercial DRM-free sources:**
+  - [Smashwords](https://www.smashwords.com) (independent authors)
+  - [Tor/Forge](https://www.tor.com) (selected sci-fi/fantasy titles)
+  - [Humble Bundle](https://www.humblebundle.com/books) (periodic book bundles)
+- **Your own content:**
+  - Personal authored documents
+  - Academic papers and theses
+  - Personal document conversions to EPUB format
+
+---
+
 ## 🐳 Docker Setup
 
 1. Install [Ollama](https://ollama.com/) and run:
