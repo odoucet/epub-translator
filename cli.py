@@ -4,6 +4,8 @@ import time
 import json
 from pathlib import Path
 import logging
+import re
+from html import escape
 from ebooklib import epub
 import ebooklib
 from bs4 import BeautifulSoup
@@ -43,7 +45,56 @@ def truncate_text(text: str, word_limit: int = 500) -> str:
     return truncated + "..."
 
 
+def read_input_document(file_path: Path) -> tuple[str, str]:
+    """Read a supported input file and return (text_content, source_format)."""
+    suffix = file_path.suffix.lower()
+
+    if suffix == '.epub':
+        book = epub.read_epub(str(file_path))
+        texts = []
+        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            soup = BeautifulSoup(item.get_content(), 'html.parser')
+            text = soup.get_text(strip=True)
+            if text:
+                texts.append(text)
+        return "\n\n".join(texts), 'epub'
+
+    if suffix == '.pdf':
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:  # pragma: no cover - dependency error handled at runtime
+            raise RuntimeError("PDF input support requires the 'pypdf' package. Install it with: pip install pypdf>=6.14.2") from exc
+
+        reader = PdfReader(str(file_path))
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text() or ''
+            if text:
+                pages.append(text)
+        return "\n\n".join(pages), 'pdf'
+
+    raise ValueError(f"Unsupported input format: {file_path.suffix or file_path.name}. Supported: .epub, .pdf")
+
+
+def pdf_to_html(text: str) -> str:
+    """Convert extracted PDF text into HTML paragraphs suitable for translation."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
+    if not paragraphs:
+        return "<html><body><p></p></body></html>"
+    body = "".join(f"<p>{escape(p)}</p>" for p in paragraphs)
+    return f"<html><body>{body}</body></html>"
+
+
 def extract_plaintext(epub_path: Path, lang: str, chapter_only: int = None, debug: bool = False) -> str:
+    if epub_path.suffix.lower() == '.pdf':
+        text, _ = read_input_document(epub_path)
+        if chapter_only:
+            parts = re.split(r"\n\s*\n+", text)
+            if 1 <= chapter_only <= len(parts):
+                return parts[chapter_only - 1].strip()
+            return ""
+        return text
+
     book = epub.read_epub(str(epub_path))
     texts = []
     valid = []
@@ -173,8 +224,8 @@ def write_markdown(out_file: Path, original: str, model_data: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Translate EPUB or compare models on a chapter.")
-    parser.add_argument('-f', '--file', required=True, help="Path to EPUB file")
+    parser = argparse.ArgumentParser(description="Translate EPUB/PDF or compare models on a chapter.")
+    parser.add_argument('-f', '--file', required=True, help="Path to EPUB/PDF file")
     parser.add_argument('-l', '--lang', required=True, help="Target language")
     parser.add_argument('-m', '--model', default='mistral:7b,nous-hermes2', 
                        help="Model name(s) for translation - comma-separated list, will fallback in order (e.g., 'dorian2b/vera,mistral-small:24b')")
@@ -197,15 +248,16 @@ def main():
     setup_logging(args.debug)
     logger = logging.getLogger(__name__)
 
-    # Vérification DRM avant de commencer la traduction
-    logger.info("🔒 Vérification DRM du fichier EPUB...")
-    drm_status = detect_drm(args.file)
-    if drm_status != DRM_NONE:
-        logger.error("❌ DRM détecté: %s", drm_status)
-        logger.error("❌ Impossible de traduire un fichier EPUB protégé par DRM")
-        logger.error("💡 Veuillez utiliser un fichier EPUB sans DRM")
-        return 1
-    logger.info("✅ Aucun DRM détecté, traduction autorisée")
+    if Path(args.file).suffix.lower() == '.epub':
+        # Vérification DRM avant de commencer la traduction
+        logger.info("🔒 Vérification DRM du fichier EPUB...")
+        drm_status = detect_drm(args.file)
+        if drm_status != DRM_NONE:
+            logger.error("❌ DRM détecté: %s", drm_status)
+            logger.error("❌ Impossible de traduire un fichier EPUB protégé par DRM")
+            logger.error("💡 Veuillez utiliser un fichier EPUB sans DRM")
+            return 1
+        logger.info("✅ Aucun DRM détecté, traduction autorisée")
 
     prompt = PREDEFINED_PROMPTS[args.prompt_style].format(target_language=args.lang)
 
@@ -242,6 +294,43 @@ def main():
         return
 
     lang_code = normalize_language(args.lang)
+    input_path = Path(args.file)
+
+    if input_path.suffix.lower() == '.pdf':
+        logger.info("📄 PDF input detected: extracting text to translate")
+        text, _ = read_input_document(input_path)
+        if not text.strip():
+            logger.error("No content to translate")
+            return
+
+        html = pdf_to_html(text)
+        translated, successful_model = translate_with_fallback(
+            model_list, prompt, args.url, html, {}, debug=args.debug, chapter_info='PDF input'
+        )
+
+        if args.output_file:
+            out_epub = Path(args.output_file)
+        else:
+            out_epub = input_path.with_suffix(f'.{lang_code}.epub')
+
+        book = epub.EpubBook()
+        book.set_identifier(str(input_path))
+        book.set_title(input_path.stem)
+        book.set_language(lang_code)
+        chapter = epub.EpubHtml(title=input_path.stem, file_name='chapter.xhtml', lang=lang_code)
+        chapter.content = translated
+        book.add_item(chapter)
+        book.toc = (chapter,)
+        book.spine = ['nav', chapter]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        epub.write_epub(str(out_epub), book)
+        logger.info("Saved translated EPUB: %s", out_epub)
+        if args.pdf:
+            from .epub_utils import generate_pdf
+            generate_pdf(out_epub)
+        return
+
     book = epub.read_epub(args.file)
     chunks = get_html_chunks(book, args.chapter)
     if not chunks:
