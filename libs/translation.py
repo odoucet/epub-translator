@@ -65,7 +65,7 @@ def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
 def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
     """
     Validate translation and clean up backticks if present.
-    
+
     Returns:
         tuple[bool, str, str]: (is_valid, error_message_or_cleaned_content, cleaned_content)
         - If valid: (True, cleaned_content, cleaned_content)
@@ -73,11 +73,11 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
     """
     if not trans or len(trans.strip()) < 10:
         return False, "Translation too short", trans
-    
+
     # Check if input starts with HTML tag and output should too
     orig_stripped = orig.strip()
     trans_stripped = trans.strip()
-    
+
     # Clean backticks from output (some models wrap content in ` or ```)
     # Check for triple backticks first, then single backticks
     if trans_stripped.startswith('```') and trans_stripped.endswith('```'):
@@ -94,17 +94,17 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
     elif trans_stripped.startswith('`') and trans_stripped.endswith('`'):
         # Remove single backticks
         trans_stripped = trans_stripped[1:-1].strip()
-    
+
     if orig_stripped.startswith('<'):
         # Find the first tag in original
         first_tag_end = orig_stripped.find('>')
         if first_tag_end > 0:
             first_tag = orig_stripped[:first_tag_end + 1]
-            
+
             # Translation should start with the same tag
             if not trans_stripped.startswith(first_tag):
                 return False, f"Output should start with '{first_tag}' but starts with '{trans_stripped[:50]}...'", trans
-    
+
     if '<p' in orig and '<p' not in trans_stripped:
         return False, "Paragraph tags missing", trans
     try:
@@ -113,7 +113,7 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
             return False, "Too little text after parsing", trans
     except Exception as e:
         return False, f"Invalid HTML: {e}", trans
-    
+
     return True, trans_stripped, trans_stripped
 
 
@@ -522,13 +522,13 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             
             # Validate the translation
             valid, error_cleaned, cleaned_content = validate_translation(block, content)
-            
+
             if not valid:
                 logger.debug("%sValidation failed: %s", context_prefix, error_cleaned)
-                logger.debug("%sOriginal has <p> tags: %d, Translation has <p> tags: %d", 
+                logger.debug("%sOriginal has <p> tags: %d, Translation has <p> tags: %d",
                            context_prefix, block.count('<p>'), content.count('<p>'))
                 raise TranslationError(f"Translation validation failed: {error_cleaned}")
-            
+
             # Use the cleaned content
             content = cleaned_content
             
