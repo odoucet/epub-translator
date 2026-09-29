@@ -5,6 +5,7 @@ from pathlib import Path
 from ebooklib import epub
 from bs4 import BeautifulSoup
 
+from cli import read_input_document, pdf_to_html
 from libs.epub_utils import get_html_chunks, normalize_language
 from libs.translation import translate_with_chunking
 from libs.notes import convert_translator_notes_to_footnotes

@@ -127,6 +127,18 @@ class TestExtractPlaintext:
         # Should return empty string for non-existent chapter
         assert result == ""
 
+    @patch('pypdf.PdfReader')
+    def test_extract_pdf_text(self, mock_pdf_reader):
+        """Test extracting plaintext from a PDF input."""
+        mock_page = Mock()
+        mock_page.extract_text.return_value = "First paragraph.\n\nSecond paragraph."
+        mock_pdf_reader.return_value.pages = [mock_page]
+
+        result = extract_plaintext(Path('sample.pdf'), 'en')
+
+        assert 'First paragraph.' in result
+        assert 'Second paragraph.' in result
+
 
 class TestRunModelTranslation:
     """Test model translation functionality."""

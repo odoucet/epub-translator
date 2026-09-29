@@ -1,6 +1,6 @@
 # EPUB Translator (Autonomous Version)
 
-This project allows you to translate EPUB books using a local LLM like Mistral or Gemma (via Ollama) or any OpenAI-compatible API.  
+This project allows you to translate EPUB and PDF books using a local LLM like Mistral or Gemma (via Ollama) or any OpenAI-compatible API.  
 It preserves HTML structure (headers, emphasis, lists), supports translator footnotes, and can output both EPUB and PDF.
 
 ---
@@ -81,6 +81,7 @@ The translator automatically detects and **blocks translation of DRM-protected E
 
 ```bash
 python cli.py --file book.epub -l french --prompt-style literary --pdf
+python cli.py --file book.pdf -l french --prompt-style literary
 ```
 
 Options:
@@ -88,6 +89,7 @@ Options:
 - `--workspace` → resume from previous translation progress
 - `--model mistral` → use a specific model
 - `--url http://localhost:11434` → custom API endpoint
+- PDF input is supported via text extraction; the output remains an EPUB (and optional PDF export via `--pdf`)
 
 ---
 
