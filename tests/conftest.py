@@ -6,6 +6,12 @@ from ebooklib import epub
 import ebooklib
 
 
+@pytest.fixture(autouse=True)
+def no_retry_delay(monkeypatch):
+    """Skip sleeps between chunk retry attempts."""
+    monkeypatch.setattr('libs.translation.CHUNK_RETRY_DELAY', 0)
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""

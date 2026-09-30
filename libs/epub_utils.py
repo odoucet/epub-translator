@@ -88,6 +88,22 @@ def normalize_language(lang_input: str) -> str:
     return LANGUAGES.get(key, key)
 
 
+def language_name(lang_input: str) -> str:
+    """Return the English language name for a code or name ('fr' -> 'French'), for use in prompts."""
+    NAMES = {
+        "fr": "French",
+        "en": "English",
+        "de": "German",
+        "es": "Spanish",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "ja": "Japanese",
+        "zh": "Chinese"
+    }
+    code = normalize_language(lang_input)
+    return NAMES.get(code, lang_input.strip())
+
+
 def hash_key(text: str) -> str:
     """Generate a SHA256 hash key for a given text."""
     return hashlib.sha256(text.encode('utf-8')).hexdigest()

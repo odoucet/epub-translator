@@ -11,8 +11,86 @@ from .notes import convert_translator_notes_to_footnotes
 
 logger = logging.getLogger(__name__)
 
+# Above this body size, skip the single-request attempt: models truncate or summarise huge inputs
+MAX_SINGLE_REQUEST_CHARS = 16000
+# Translated text shorter than this ratio of the original text is considered truncated
+MIN_TRANSLATION_RATIO = 0.5
+# Ratio check only applies to originals long enough for the ratio to be meaningful
+MIN_TEXT_FOR_RATIO_CHECK = 500
+# Token estimates used to derive the chunk size from the model limits (conservative for HTML)
+CHARS_PER_TOKEN = 3
+# A translation usually needs more tokens than its source (French is ~20% longer than English)
+OUTPUT_TOKEN_RATIO = 1.3
+TOKEN_SAFETY_MARGIN = 0.9
+# smart_html_split looks for a tag up to this many chars past its target size
+SPLIT_OVERSHOOT = 1000
+# Chunks are never split below this size
+MIN_CHUNK_SIZE = 2000
+# Attempts per chunk and model before splitting it (transient API errors are common on remote providers)
+CHUNK_ATTEMPTS = 3
+# Base delay in seconds between attempts, multiplied by the attempt number
+CHUNK_RETRY_DELAY = 5
+
 class TranslationError(Exception):
     pass
+
+
+class EmptyOutputError(TranslationError):
+    """The API answered without any content (e.g. the provider dropped an output it flagged as reasoning)."""
+
+
+# Models that return an empty output when given a system prompt, detected at runtime
+_NO_SYSTEM_PROMPT_MODELS = set()
+
+
+def is_openai_compatible(api_base: str) -> bool:
+    """OpenAI-compatible APIs (OpenRouter, vLLM, llama.cpp...) are addressed by a versioned base URL."""
+    return re.search(r'/v\d+$', api_base.rstrip('/')) is not None
+
+
+def get_model_limits(api_base: str, model: str, api_key: str = None) -> tuple[int | None, int | None]:
+    """
+    Query the OpenAI-compatible /models endpoint for the model token limits.
+
+    Returns:
+        tuple: (context_length, max_output_tokens), None for each unknown value
+    """
+    if not is_openai_compatible(api_base):
+        return None, None
+    headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+    try:
+        resp = requests.get(api_base.rstrip('/') + '/models', headers=headers, timeout=30)
+        resp.raise_for_status()
+        models = resp.json().get('data', [])
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("Could not fetch model limits from %s/models: %s", api_base.rstrip('/'), e)
+        return None, None
+
+    for info in models:
+        if info.get('id') == model:
+            # OpenRouter exposes context_length/top_provider, vLLM exposes max_model_len
+            context_length = info.get('context_length') or info.get('max_model_len')
+            max_output = (info.get('top_provider') or {}).get('max_completion_tokens')
+            return context_length, max_output
+    logger.warning("Model %s not listed by %s/models, token limits unknown", model, api_base.rstrip('/'))
+    return None, None
+
+
+def compute_max_chunk_chars(context_length: int | None, max_output_tokens: int | None, prompt: str) -> int | None:
+    """
+    Derive the largest source chunk (in chars) whose translation fits the model token limits.
+    The chunk and its translation must both fit the context window, and the translation the output limit.
+    """
+    budgets = []
+    if max_output_tokens:
+        budgets.append(max_output_tokens / OUTPUT_TOKEN_RATIO)
+    if context_length:
+        prompt_tokens = len(prompt) / CHARS_PER_TOKEN
+        budgets.append((context_length - prompt_tokens) / (1 + OUTPUT_TOKEN_RATIO))
+    if not budgets:
+        return None
+    chunk_chars = int(min(budgets) * TOKEN_SAFETY_MARGIN * CHARS_PER_TOKEN)
+    return max(MIN_CHUNK_SIZE, chunk_chars)
 
 
 def extract_html_structure(html: str) -> tuple[str, str, str]:
@@ -109,10 +187,17 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
         return False, "Paragraph tags missing", trans
     try:
         soup = BeautifulSoup(trans_stripped, 'html.parser')
-        if len(soup.get_text(strip=True)) < 5:  # Reduced threshold for testing
+        trans_text_len = len(soup.get_text(strip=True))
+        if trans_text_len < 5:  # Reduced threshold for testing
             return False, "Too little text after parsing", trans
     except Exception as e:
         return False, f"Invalid HTML: {e}", trans
+
+    # Detect truncated or summarised output: a real translation keeps roughly the same amount of text
+    orig_text_len = len(BeautifulSoup(orig, 'html.parser').get_text(strip=True))
+    if orig_text_len >= MIN_TEXT_FOR_RATIO_CHECK and trans_text_len < orig_text_len * MIN_TRANSLATION_RATIO:
+        return False, (f"Translation too short compared to original ({trans_text_len} vs {orig_text_len} chars), "
+                       "probably truncated or summarised"), trans
 
     return True, trans_stripped, trans_stripped
 
@@ -190,7 +275,7 @@ def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
         if best_split is None:
             min_chunk_size = max(1000, target_size // 4)  # Don't create chunks smaller than 1k or 1/4 target
             for tag in major_tags:
-                tag_pos = remaining.find(tag, min_chunk_size)
+                tag_pos = remaining.find(tag, min_chunk_size, search_end)
                 if tag_pos != -1:
                     best_split = tag_pos + len(tag)
                     break
@@ -201,13 +286,14 @@ def smart_html_split(html: str, target_size: int = 8000) -> list[str]:
             # Look for any closing tag
             import re
             tag_pattern = r'</[^>]+>'
-            match = re.search(tag_pattern, remaining[min_chunk_size:])
+            match = re.search(tag_pattern, remaining[min_chunk_size:search_end])
             if match:
                 best_split = min_chunk_size + match.end()
             else:
-                # Last resort: split at target_size but warn
-                logger.warning("No HTML tag found for splitting, forced to cut at position %d", target_size)
-                best_split = target_size
+                # Last resort: cut at the last whitespace before target_size, never inside a word
+                space_pos = max(remaining.rfind(' ', 0, target_size), remaining.rfind('\n', 0, target_size))
+                best_split = space_pos if space_pos > min_chunk_size else target_size
+                logger.warning("No HTML tag found for splitting, forced to cut at position %d", best_split)
         
         # Extract chunk and update remaining
         chunk = remaining[:best_split].strip()
@@ -261,8 +347,14 @@ def smart_html_split_with_structure(html: str, target_size: int = 8000) -> list[
     return structured_chunks
 
 
+def split_within_limit(html: str, target_size: int, limit: int) -> list[str]:
+    """Split html near target_size, leaving room for smart_html_split overshoot so chunks stay under limit."""
+    return smart_html_split(html, max(MIN_CHUNK_SIZE, min(target_size, limit - SPLIT_OVERSHOOT)))
+
+
 def translate_with_chunking(api_base: str, models: str | list[str], prompt: str, html: str, progress: dict, 
-                          debug: bool = False, chapter_info: str = None) -> tuple[str, str]:
+                          debug: bool = False, chapter_info: str = None, api_key: str = None,
+                          max_chunk_chars: int = None) -> tuple[str, str]:
     """
     Translate HTML with intelligent chunking and model fallback.
     
@@ -274,10 +366,14 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
         progress: Progress tracking dictionary
         debug: Enable debug logging
         chapter_info: Optional chapter context for logging (e.g., "Chapter 1/5")
+        api_key: Optional bearer token for remote APIs
+        max_chunk_chars: Largest body size sent in one request, derived from the model token limits
         
     Returns:
         tuple[str, str]: (translated_html, successful_model_name)
     """
+    request_limit = min(MAX_SINGLE_REQUEST_CHARS, max_chunk_chars or MAX_SINGLE_REQUEST_CHARS)
+
     # Ensure models is a list
     if isinstance(models, str):
         model_list = [models]
@@ -295,134 +391,112 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     logger.debug("%sExtracted structure: prefix=%d chars, body=%d chars, suffix=%d chars", 
                 chapter_prefix, len(prefix), len(body_content), len(suffix))
     
-    # Try each model in sequence
-    for model_idx, model in enumerate(model_list):
-        logger.debug("%sTrying model %s (%d/%d)", chapter_prefix, model, model_idx + 1, len(model_list))
-        
+    # Try full translation first with the primary model - only send body content
+    if len(body_content) <= request_limit:
         try:
-            # Try full translation first - only send body content
-            logger.debug("%sAttempting full translation with %s", chapter_prefix, model)
-            translated_body = _translate_once(api_base, model, prompt, body_content, debug, chapter_info)
-            
-            # Wrap the translated body with the original HTML structure
-            full_translated = wrap_html_content(translated_body, prefix, suffix)
-            logger.debug("%sFull translation successful with %s", chapter_prefix, model)
-            return full_translated, model
-            
+            logger.debug("%sAttempting full translation with %s", chapter_prefix, model_list[0])
+            translated_body = _translate_once(api_base, model_list[0], prompt, body_content, debug, chapter_info,
+                                              api_key=api_key)
+            logger.debug("%sFull translation successful with %s", chapter_prefix, model_list[0])
+            return wrap_html_content(translated_body, prefix, suffix), model_list[0]
         except TranslationError as e:
-            logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model, e)
-            
-            # Try chunking with progressively halved sizes
-            # Start with body content size and halve until we get manageable chunks
-            initial_size = len(body_content)
-            
-            # Check if we have a previously successful chunk size to start with
-            preferred_chunk_size = progress.get('preferred_chunk_size')
-            if preferred_chunk_size and preferred_chunk_size < initial_size:
-                logger.debug("%sUsing previously successful chunk size: %d", chapter_prefix, preferred_chunk_size)
-                chunk_size = preferred_chunk_size
-            else:
-                chunk_size = min(initial_size // 2, 16000)  # Start with half the content or 16k, whichever is smaller
-            
-            min_chunk_size = 2000  # Don't go below 2k characters
-            
-            while chunk_size >= min_chunk_size:
-                if chunk_size >= initial_size:
-                    # If chunk size is larger than content, reduce and try again
-                    chunk_size = chunk_size // 2
-                    continue
-                    
-                logger.debug("%sTrying chunking with %s, chunk size %d (body content size: %d)", 
-                           chapter_prefix, model, chunk_size, initial_size)
-                try:
-                    # Split only the body content, then wrap each chunk
-                    body_chunks = smart_html_split(body_content, chunk_size)
-                    chunks = [wrap_html_content(body_chunk, prefix, suffix) for body_chunk in body_chunks]
-                    logger.debug("%sCreated %d chunks of target size %d with %s", chapter_prefix, len(chunks), chunk_size, model)
-                    
-                    translated_chunks = []
-                    chunk_failed = False
-                    
-                    for i, chunk in enumerate(chunks):
-                        chunk_prefix = f"{chapter_prefix}Chunk {i+1}/{len(chunks)} "
-                        logger.debug("%sTranslating chunk %d/%d with %s (length: %d chars)", 
-                                   chapter_prefix, i+1, len(chunks), model, len(chunk))
-                        try:
-                            # Track timing for this chunk
-                            chunk_start = time.time()
-                            
-                            # Extract body from this chunk to send to model
-                            _, chunk_body, _ = extract_html_structure(chunk)
-                            translated_body = _translate_once(api_base, model, prompt, chunk_body, debug, 
-                                                           chapter_info, f"Chunk {i+1}/{len(chunks)}")
-                            # Wrap the translated body with the original structure
-                            translated_chunk = wrap_html_content(translated_body, prefix, suffix)
-                            translated_chunks.append(translated_chunk)
-                            
-                            # Calculate timing and speed
-                            chunk_elapsed = time.time() - chunk_start
-                            chars_per_min = int((len(chunk_body) * 60) / chunk_elapsed) if chunk_elapsed > 0 else 0
-                            logger.debug("%sChunk %d/%d ✅ %s - %.1fs (%d chars/min) - %d chars", 
-                                       chapter_prefix, i+1, len(chunks), model, chunk_elapsed, chars_per_min, len(translated_body))
-                        except TranslationError as chunk_error:
-                            logger.warning("%sChunk %d/%d translation failed with %s: %s", 
-                                         chapter_prefix, i+1, len(chunks), model, chunk_error)
-                            # If chunk is small (< 4k) and still failing, try next model
-                            if len(chunk) < 4000 and model_idx < len(model_list) - 1:
-                                logger.info("%sChunk < 4k chars failed with %s, will try next model", 
-                                          chapter_prefix, model)
-                                chunk_failed = True
-                                break
-                            else:
-                                # Try smaller chunks by halving
-                                chunk_failed = True
-                                break
-                    
-                    if not chunk_failed:
-                        # All chunks successful - merge body content and wrap once
-                        logger.debug("%sAll chunks translated successfully with %s, merging results", chapter_prefix, model)
-                        
-                        # Extract body content from each translated chunk and merge
-                        merged_body_parts = []
-                        for translated_chunk in translated_chunks:
-                            _, chunk_body, _ = extract_html_structure(translated_chunk)
-                            merged_body_parts.append(chunk_body)
-                        
-                        # Merge all body parts and wrap with original structure
-                        merged_body = ''.join(merged_body_parts)
-                        result = wrap_html_content(merged_body, prefix, suffix)
-                        
-                        logger.debug("%sChunked translation completed successfully with %s", chapter_prefix, model)
-                        # Update progress with chunk information and remember successful chunk size
-                        progress['chunk_parts'] = len(chunks)
-                        progress['preferred_chunk_size'] = chunk_size
-                        logger.info("%sRemembering successful chunk size: %d chars for future chapters", chapter_prefix, chunk_size)
-                        return result, model
-                    elif len(chunks) > 0 and len(chunks[0]) < 4000:
-                        # Very small chunks failed, try next model
-                        break
-                        
-                except Exception as e:
-                    logger.error("%sChunking with %s, size %d failed: %s", chapter_prefix, model, chunk_size, e)
-                
-                # Halve the chunk size for next iteration
-                chunk_size = chunk_size // 2
-                logger.debug("%sHalving chunk size to %d", chapter_prefix, chunk_size)
-            
-            # If we're here, this model failed entirely
-            if model_idx < len(model_list) - 1:
-                logger.info("%sModel %s failed entirely, trying next model", chapter_prefix, model)
-                continue
-            else:
-                logger.error("%sAll models failed", chapter_prefix)
-                raise TranslationError(f"All models ({', '.join(model_list)}) failed")
-    
-    # Should never reach here
-    raise TranslationError("All models failed")
+            logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model_list[0], e)
+    else:
+        logger.info("%sContent too large for a single request (%d chars), using chunks",
+                    chapter_prefix, len(body_content))
+
+    # Check if we have a previously successful chunk size to start with
+    initial_size = len(body_content)
+    preferred_chunk_size = progress.get('preferred_chunk_size')
+    if preferred_chunk_size and preferred_chunk_size < initial_size and preferred_chunk_size <= request_limit:
+        logger.debug("%sUsing previously successful chunk size: %d", chapter_prefix, preferred_chunk_size)
+        chunk_size = preferred_chunk_size
+    else:
+        # Start with half the content or the single request limit, whichever is smaller
+        chunk_size = max(MIN_CHUNK_SIZE, min(initial_size // 2, request_limit))
+
+    body_chunks = split_within_limit(body_content, chunk_size, request_limit)
+    logger.debug("%sCreated %d chunks of target size %d", chapter_prefix, len(body_chunks), chunk_size)
+
+    translated_parts = []
+    models_used = []
+    for i, body_chunk in enumerate(body_chunks):
+        chunk_label = f"Chunk {i+1}/{len(body_chunks)}"
+        translated_body, used_model = _translate_chunk_resilient(
+            api_base, model_list, prompt, body_chunk, debug, chapter_info, chunk_label, api_key
+        )
+        translated_parts.append(translated_body)
+        models_used.append(used_model)
+
+    progress['chunk_parts'] = len(body_chunks)
+    progress['preferred_chunk_size'] = chunk_size
+    logger.info("%sRemembering successful chunk size: %d chars for future chapters", chapter_prefix, chunk_size)
+
+    # Report the model that translated most of the content
+    main_model = max(model_list, key=models_used.count)
+    return wrap_html_content(''.join(translated_parts), prefix, suffix), main_model
+
+
+def _translate_chunk_resilient(api_base: str, model_list: list[str], prompt: str, body_chunk: str,
+                               debug: bool, chapter_info: str, chunk_label: str,
+                               api_key: str = None) -> tuple[str, str]:
+    """
+    Translate one chunk, never restarting already translated chunks:
+    retry the same chunk, then split only this chunk in half, then fall back to the next model.
+    """
+    chapter_prefix = f"{chapter_info} " if chapter_info else ""
+    last_error = None
+
+    for model_idx, model in enumerate(model_list):
+        for attempt in range(1, CHUNK_ATTEMPTS + 1):
+            chunk_start = time.time()
+            try:
+                translated_body = _translate_once(api_base, model, prompt, body_chunk, debug,
+                                                  chapter_info, chunk_label, api_key=api_key)
+                chunk_elapsed = time.time() - chunk_start
+                chars_per_min = int((len(body_chunk) * 60) / chunk_elapsed) if chunk_elapsed > 0 else 0
+                logger.info("%s%s ✅ %s - %.1fs (%d chars/min) - %d chars",
+                            chapter_prefix, chunk_label, model, chunk_elapsed, chars_per_min, len(translated_body))
+                return translated_body, model
+            except TranslationError as e:
+                last_error = e
+                logger.warning("%s%s attempt %d/%d failed with %s: %s",
+                               chapter_prefix, chunk_label, attempt, CHUNK_ATTEMPTS, model, e)
+                if isinstance(e, EmptyOutputError) and model_idx < len(model_list) - 1:
+                    # Retrying rarely helps when the provider drops the output: switch model right away
+                    break
+                if attempt < CHUNK_ATTEMPTS:
+                    time.sleep(CHUNK_RETRY_DELAY * attempt)
+
+        if isinstance(last_error, EmptyOutputError) and model_idx < len(model_list) - 1:
+            logger.info("%s%s: empty output from %s, trying next model", chapter_prefix, chunk_label, model)
+            continue
+
+        # Retries exhausted: split only this chunk and translate its halves
+        if len(body_chunk) >= 2 * MIN_CHUNK_SIZE:
+            sub_chunks = smart_html_split(body_chunk, len(body_chunk) // 2)
+            if len(sub_chunks) > 1:
+                logger.info("%s%s: splitting into %d smaller chunks", chapter_prefix, chunk_label, len(sub_chunks))
+                parts = []
+                sub_models = []
+                for j, sub_chunk in enumerate(sub_chunks):
+                    sub_body, sub_model = _translate_chunk_resilient(
+                        api_base, model_list[model_idx:], prompt, sub_chunk, debug, chapter_info,
+                        f"{chunk_label}.{j+1}", api_key
+                    )
+                    parts.append(sub_body)
+                    sub_models.append(sub_model)
+                return ''.join(parts), sub_models[0]
+
+        if model_idx < len(model_list) - 1:
+            logger.info("%s%s failed with %s, trying next model", chapter_prefix, chunk_label, model)
+
+    logger.error("%s%s: all models failed", chapter_prefix, chunk_label)
+    raise TranslationError(f"All models ({', '.join(model_list)}) failed on {chunk_label}: {last_error}")
 
 
 def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: bool = False, 
-                   chapter_info: str = None, chunk_info: str = None) -> str:
+                   chapter_info: str = None, chunk_info: str = None, api_key: str = None) -> str:
     """
     Make a single translation request. No retries - if it fails, let the caller handle it.
     
@@ -434,8 +508,11 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
         debug: Enable debug logging
         chapter_info: Optional chapter context (e.g., "Chapter 1/5")
         chunk_info: Optional chunk context (e.g., "Chunk 1/5")
+        api_key: Optional bearer token sent as Authorization header
     """
-    url = api_base.rstrip('/') + '/api/chat'
+    base = api_base.rstrip('/')
+    openai_compat = is_openai_compatible(base)
+    url = base + ('/chat/completions' if openai_compat else '/api/chat')
     
     # Create context prefix for logging
     context_prefix = ""
@@ -447,15 +524,23 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
     elif chunk_info:
         context_prefix = f"{chunk_info} "
     
-    payload = {
-        'model': model,
-        'messages': [
+    if model in _NO_SYSTEM_PROMPT_MODELS:
+        messages = [{'role':'user','content':prompt + "\n\n" + block}]
+    else:
+        messages = [
             {'role':'system','content':prompt},
             {'role':'user','content':block}
-        ],
-        'options':{'seed':101,'temperature':0},
+        ]
+    payload = {
+        'model': model,
+        'messages': messages,
         'stream':False
     }
+    if openai_compat:
+        payload.update({'seed':101,'temperature':0})
+    else:
+        payload['options'] = {'seed':101,'temperature':0}
+    headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
     
     # Write debug info to file if debug mode is enabled
     if debug:
@@ -465,6 +550,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             'payload': payload,
             'model': model,
             'api_base': api_base,
+            'api_key_set': bool(api_key),
             'block_length': len(block),
             'context': {
                 'chapter': chapter_info,
@@ -480,7 +566,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
     try:
         logger.debug("%sMaking translation request with model %s, block length: %d chars", 
                     context_prefix, model, len(block))
-        resp = requests.post(url, json=payload, timeout=300)
+        resp = requests.post(url, json=payload, headers=headers, timeout=300)
         
         # Update debug file with response if debug mode is enabled
         if debug:
@@ -509,16 +595,43 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
         try:
             resp_json = resp.json()
             
-            if 'message' not in resp_json:
-                raise ValueError("Invalid API response format: missing 'message' field")
+            if openai_compat:
+                if not resp_json.get('choices'):
+                    raise ValueError("Invalid API response format: missing 'choices' field")
+                message = resp_json['choices'][0].get('message', {})
+                finish_reason = resp_json['choices'][0].get('finish_reason')
+            else:
+                if 'message' not in resp_json:
+                    raise ValueError("Invalid API response format: missing 'message' field")
+                message = resp_json['message']
+                finish_reason = resp_json.get('done_reason')
+
+            if finish_reason == 'length':
+                raise TranslationError("Output truncated by the model (max output tokens reached)")
             
-            if 'content' not in resp_json['message']:
-                raise ValueError("Invalid API response format: missing 'content' field")
+            if not (message.get('content') or '').strip() and model not in _NO_SYSTEM_PROMPT_MODELS:
+                # Some models (e.g. Tencent Hy-MT) switch to an empty "reasoning" output when given a system
+                # prompt: send the instructions in the user message for this model from now on
+                logger.warning("%sEmpty output from %s with a system prompt, retrying with instructions "
+                               "in the user message (kept for the rest of the run)", context_prefix, model)
+                _NO_SYSTEM_PROMPT_MODELS.add(model)
+                return _translate_once(api_base, model, prompt, block, debug, chapter_info, chunk_info, api_key)
+
+            if 'content' not in message or message['content'] is None:
+                # Providers (e.g. OpenRouter) report upstream failures as a null content with an error field
+                details = []
+                if finish_reason:
+                    details.append(f"finish_reason={finish_reason}")
+                provider_error = resp_json.get('error') or (resp_json.get('choices') or [{}])[0].get('error')
+                if provider_error:
+                    details.append(f"error={provider_error}")
+                suffix_msg = f" ({', '.join(details)})" if details else ""
+                raise EmptyOutputError(f"Invalid API response format: missing 'content' field{suffix_msg}")
             
-            content = resp_json['message']['content'].strip()
+            content = message['content'].strip()
             
             if not content:
-                raise ValueError("Empty response from API")
+                raise EmptyOutputError("Empty response from API")
             
             # Validate the translation
             valid, error_cleaned, cleaned_content = validate_translation(block, content)
@@ -539,6 +652,9 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             logger.error("%sJSON parsing/structure error: %s", context_prefix, json_err)
             raise TranslationError(f"Invalid API response: {json_err}")
             
+    except EmptyOutputError as e:
+        logger.error("%sTranslation request failed: %s", context_prefix, e)
+        raise
     except Exception as e:
         logger.error("%sTranslation request failed: %s", context_prefix, e)
         raise TranslationError(f"Translation failed: {e}")

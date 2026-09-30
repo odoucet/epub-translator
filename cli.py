@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import os
+import sys
 import time
 import json
 from pathlib import Path
@@ -13,10 +15,13 @@ from tqdm import tqdm
 
 from libs.epub_utils import (
     normalize_language, load_progress, save_progress,
-    get_html_chunks, inject_translations, hash_key,
+    get_html_chunks, inject_translations, hash_key, language_name,
     setup_logging, detect_drm, DRM_NONE
 )
-from libs.translation import translate_with_chunking, TranslationError
+from libs.translation import (
+    translate_with_chunking, TranslationError, get_model_limits, compute_max_chunk_chars,
+    split_within_limit, extract_html_structure, MAX_SINGLE_REQUEST_CHARS
+)
 from libs.notes import convert_translator_notes_to_footnotes
 from libs.prompts import PREDEFINED_PROMPTS
 
@@ -60,20 +65,41 @@ def read_input_document(file_path: Path) -> tuple[str, str]:
         return "\n\n".join(texts), 'epub'
 
     if suffix == '.pdf':
-        try:
-            from pypdf import PdfReader
-        except ImportError as exc:  # pragma: no cover - dependency error handled at runtime
-            raise RuntimeError("PDF input support requires the 'pypdf' package. Install it with: pip install pypdf>=6.14.2") from exc
-
-        reader = PdfReader(str(file_path))
-        pages = []
-        for page in reader.pages:
-            text = page.extract_text() or ''
-            if text:
-                pages.append(text)
-        return "\n\n".join(pages), 'pdf'
+        # Clean after joining pages: a hyphenated word may span a page break
+        pages = [text for text in extract_pdf_pages(file_path) if text.strip()]
+        return clean_pdf_text("\n\n".join(pages)), 'pdf'
 
     raise ValueError(f"Unsupported input format: {file_path.suffix or file_path.name}. Supported: .epub, .pdf")
+
+
+def extract_pdf_pages(file_path: Path) -> list[str]:
+    """Extract raw text of each PDF page, preferring PyMuPDF over pypdf."""
+    try:
+        # PyMuPDF keeps soft hyphens as U+00AD, pypdf turns them into spaces ("In tel li gent")
+        import fitz
+    except ImportError:
+        fitz = None
+
+    if fitz is not None:
+        with fitz.open(str(file_path)) as doc:
+            # Text blocks match the PDF paragraphs (block type 0 is text, 1 is image)
+            return ["\n\n".join(block[4] for block in page.get_text("blocks") if block[6] == 0)
+                    for page in doc]
+
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # pragma: no cover - dependency error handled at runtime
+        raise RuntimeError("PDF input support requires 'pymupdf' (recommended) or 'pypdf'. "
+                           "Install it with: pip install pymupdf") from exc
+
+    reader = PdfReader(str(file_path))
+    return [page.extract_text() or '' for page in reader.pages]
+
+
+def clean_pdf_text(text: str) -> str:
+    """Remove soft hyphens, rejoining words split across lines (with an optional visible hyphen U+2010)."""
+    text = re.sub(r'\u00ad\u2010?\s*\n\s*', '', text)
+    return text.replace('\u00ad', '')
 
 
 def pdf_to_html(text: str) -> str:
@@ -81,7 +107,8 @@ def pdf_to_html(text: str) -> str:
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
     if not paragraphs:
         return "<html><body><p></p></body></html>"
-    body = "".join(f"<p>{escape(p)}</p>" for p in paragraphs)
+    # Line breaks inside a paragraph are only PDF layout
+    body = "".join(f"<p>{escape(' '.join(p.split()))}</p>" for p in paragraphs)
     return f"<html><body>{body}</body></html>"
 
 
@@ -143,7 +170,8 @@ def get_chapter_info(epub_path: Path, chapter: int) -> tuple[str, int]:
 
 
 def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: Path,
-                          prompt: str, url: str, debug: bool = False) -> tuple[str, float]:
+                          prompt: str, url: str, debug: bool = False,
+                          api_key: str = None) -> tuple[str, float]:
     start = time.time()
     book = epub.read_epub(str(epub_file))
     chunks = get_html_chunks(book, chapter_only=chapter)
@@ -156,7 +184,8 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
     chapter_info = f"Chapter {chapter}"
     
     translated_html, _ = translate_with_chunking(url, model_name, prompt, html, {}, 
-                                               debug=debug, chapter_info=chapter_info)
+                                               debug=debug, chapter_info=chapter_info,
+                                               api_key=api_key)
     translated_html, notes = convert_translator_notes_to_footnotes(translated_html)
     full_html = translated_html + ''.join(notes)
     plain = BeautifulSoup(full_html, 'html.parser').get_text(strip=True)
@@ -165,7 +194,8 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 
 
 def translate_with_fallback(models: list[str], prompt: str, url: str, html: str, 
-                           progress: dict, debug: bool = False, chapter_info: str = None) -> tuple[str, str]:
+                           progress: dict, debug: bool = False, chapter_info: str = None,
+                           api_key: str = None, max_chunk_chars: int = None) -> tuple[str, str]:
     """
     Translate using multiple models with intelligent chunking and fallback.
     Returns (translated_html, successful_model_name)
@@ -175,13 +205,69 @@ def translate_with_fallback(models: list[str], prompt: str, url: str, html: str,
     try:
         logger.info("Starting translation with models: %s", ", ".join(models))
         translated, successful_model = translate_with_chunking(url, models, prompt, html, progress, 
-                                                             debug=debug, chapter_info=chapter_info)
+                                                             debug=debug, chapter_info=chapter_info,
+                                                             api_key=api_key, max_chunk_chars=max_chunk_chars)
         logger.info("✅ Translation successful with model: %s", successful_model)
         return translated, successful_model
         
     except TranslationError as e:
         logger.error("❌ All models failed: %s", e)
         raise e
+
+
+def resolve_max_chunk_chars(models: list[str], url: str, prompt: str, api_key: str = None,
+                            override: int = None) -> int | None:
+    """Largest chunk (chars) fitting every model token limits, or the user override."""
+    logger = logging.getLogger(__name__)
+    if override:
+        return override
+    sizes = []
+    for model in models:
+        context_length, max_output = get_model_limits(url, model, api_key)
+        size = compute_max_chunk_chars(context_length, max_output, prompt)
+        if size:
+            logger.info("📏 %s: context %s tokens, max output %s tokens -> chunks of %d chars",
+                        model, context_length or '?', max_output or '?', size)
+            sizes.append(size)
+    return min(sizes) if sizes else None
+
+
+def translate_pdf_html(html: str, models: list[str], prompt: str, url: str, workspace: Path,
+                       max_chunk_chars: int = None, debug: bool = False, api_key: str = None) -> str | None:
+    """
+    Translate the PDF body chunk by chunk, saving each translated chunk in the progress file
+    so that an interrupted run resumes where it stopped. Returns None on failure.
+    """
+    logger = logging.getLogger(__name__)
+    prefix, body, suffix = extract_html_structure(html)
+    limit = max_chunk_chars or MAX_SINGLE_REQUEST_CHARS
+    body_chunks = split_within_limit(body, limit, limit)
+
+    prog = load_progress(workspace)
+    trans_map = prog.setdefault('translated', {})
+    done = sum(1 for chunk in body_chunks if hash_key(chunk) in trans_map)
+    if done:
+        logger.info("♻️  Resuming: %d/%d chunks already translated in %s", done, len(body_chunks), workspace)
+
+    translated_parts = []
+    for i, chunk in enumerate(tqdm(body_chunks, desc="Translating")):
+        key = hash_key(chunk)
+        if key not in trans_map:
+            try:
+                translated, _ = translate_with_fallback(
+                    models, prompt, url, prefix + chunk + suffix, {}, debug=debug,
+                    chapter_info=f"PDF chunk {i+1}/{len(body_chunks)}", api_key=api_key,
+                    max_chunk_chars=max_chunk_chars
+                )
+            except TranslationError:
+                logger.error("💾 Progress saved in %s (%d/%d chunks): re-run the same command to resume",
+                             workspace, sum(1 for c in body_chunks if hash_key(c) in trans_map), len(body_chunks))
+                return None
+            trans_map[key] = extract_html_structure(translated)[1]
+            save_progress(workspace, prog)
+        translated_parts.append(trans_map[key])
+
+    return prefix + ''.join(translated_parts) + suffix
 
 
 def write_markdown(out_file: Path, original: str, model_data: dict):
@@ -227,11 +313,15 @@ def main():
     parser = argparse.ArgumentParser(description="Translate EPUB/PDF or compare models on a chapter.")
     parser.add_argument('-f', '--file', required=True, help="Path to EPUB/PDF file")
     parser.add_argument('-l', '--lang', required=True, help="Target language")
-    parser.add_argument('-m', '--model', default='mistral:7b,nous-hermes2', 
+    parser.add_argument('-m', '--model', default='mistral-small:24b,dorian2b/vera', 
                        help="Model name(s) for translation - comma-separated list, will fallback in order (e.g., 'dorian2b/vera,mistral-small:24b')")
     parser.add_argument('-p', '--prompt-style', default='literary', help="Prompt style")
     parser.add_argument('-u', '--url', default='http://localhost:11434', help="API base URL")
+    parser.add_argument('-k', '--api-key', default=os.environ.get('LLM_API_KEY'),
+                       help="Bearer token for remote LLM API (or env LLM_API_KEY)")
     parser.add_argument('-w', '--workspace', default='.progress.json', help="Progress file")
+    parser.add_argument('--chunk-size', type=int,
+                       help="Max chars sent per request (default: derived from the model token limits)")
     parser.add_argument('--chapter', type=int, help="Chapter number for translation or comparison")
     parser.add_argument('--pdf', action='store_true', help="Export to PDF")
     parser.add_argument('--debug', action='store_true', help="Enable debug mode")
@@ -259,7 +349,7 @@ def main():
             return 1
         logger.info("✅ Aucun DRM détecté, traduction autorisée")
 
-    prompt = PREDEFINED_PROMPTS[args.prompt_style].format(target_language=args.lang)
+    prompt = PREDEFINED_PROMPTS[args.prompt_style].format(target_language=language_name(args.lang))
 
     if args.compare is not None:
         if args.compare == '':
@@ -280,7 +370,8 @@ def main():
             logger.info("[Chapter %d] 🤖 Translating with model %s...", args.chapter, model)
             try:
                 content, elapsed = run_model_translation(
-                    model, args.chapter, args.lang, Path(args.file), prompt, args.url, debug=args.debug
+                    model, args.chapter, args.lang, Path(args.file), prompt, args.url, debug=args.debug,
+                    api_key=args.api_key
                 )
                 outputs[model] = {'content': content, 'time': elapsed, 'success': True}
                 logger.info("%s done in %.1fs", model, elapsed)
@@ -304,9 +395,12 @@ def main():
             return
 
         html = pdf_to_html(text)
-        translated, successful_model = translate_with_fallback(
-            model_list, prompt, args.url, html, {}, debug=args.debug, chapter_info='PDF input'
-        )
+        max_chunk_chars = resolve_max_chunk_chars(model_list, args.url, prompt, args.api_key, args.chunk_size)
+        translated = translate_pdf_html(html, model_list, prompt, args.url, Path(args.workspace),
+                                        max_chunk_chars=max_chunk_chars, debug=args.debug,
+                                        api_key=args.api_key)
+        if translated is None:
+            return 1
 
         if args.output_file:
             out_epub = Path(args.output_file)
@@ -336,6 +430,7 @@ def main():
     if not chunks:
         logger.error("No content to translate")
         return
+    max_chunk_chars = resolve_max_chunk_chars(model_list, args.url, prompt, args.api_key, args.chunk_size)
     
     # Determine chapter context for logging
     if args.chapter:
@@ -380,7 +475,8 @@ def main():
             # Use fallback system with multiple models
             translated, successful_model = translate_with_fallback(
                 model_list, prompt, args.url, raw.decode('utf-8'), prog, 
-                debug=args.debug, chapter_info=chapter_info
+                debug=args.debug, chapter_info=chapter_info, api_key=args.api_key,
+                max_chunk_chars=max_chunk_chars
             )
             logger.info("✅ Chunk translated successfully with model: %s", successful_model)
             
@@ -406,4 +502,4 @@ def main():
         generate_pdf(out_epub)
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

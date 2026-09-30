@@ -7,13 +7,16 @@ It preserves HTML structure (headers, emphasis, lists), supports translator foot
 
 ## ✨ Features
 
-- Translate EPUB files using chunked **HTML** input for structure preservation
+- Translate **EPUB and PDF** files using chunked **HTML** input for structure preservation
 - Supports multi-style prompts (literary, elegant, narrative)
 - Outputs EPUB **and optional PDF** (`--pdf`)
-- Resumable: tracks translation progress in a JSON workspace
-- Supports local LLMs via **Ollama** and remote OpenAI-compatible APIs
+- Supports local LLMs via **Ollama** and remote **OpenAI-compatible APIs** (OpenRouter, vLLM, llama.cpp...)
+- **Model fallback**: give several models, the next one is used only for the chunks the previous one fails on
+- **Chunk size adapted to the model**: derived from its context window and max output tokens
+- **Robust against flaky APIs**: retries, halving of failing chunks, detection of truncated or summarised output
+- **Resumable**: every translated chunk is saved in a JSON workspace, re-run the same command to resume
 - Translate the **entire book or just one chapter** with `--chapter`
-- Compare model outputs on a chapter (`compare_models.py`)
+- Compare model outputs on a chapter (`--compare`)
 
 ---
 
@@ -65,10 +68,10 @@ The translator automatically detects and **blocks translation of DRM-protected E
 
 1. Install [Ollama](https://ollama.com/) and run:
    ```bash
-   ollama pull mistral
-   ollama pull gemma:2b
-   ollama pull nous-hermes2
+   ollama pull mistral-small:24b
+   ollama pull dorian2b/vera
    ```
+   These are the default models. To pull every model of the comparison below, run `./download_models.sh`.
 
 2. Build and launch translator with Docker Compose:
    ```bash
@@ -79,17 +82,49 @@ The translator automatically detects and **blocks translation of DRM-protected E
 
 ## 🚀 Translate a Book
 
+Local model with Ollama:
+
 ```bash
 python cli.py --file book.epub -l french --prompt-style literary --pdf
-python cli.py --file book.pdf -l french --prompt-style literary
+python cli.py --file book.pdf -l french -m mistral-small:24b,dorian2b/vera
+```
+
+Remote model with OpenRouter (see [model recommendations](#-model-recommendations)):
+
+```bash
+export LLM_API_KEY=sk-or-...
+python cli.py -f book.pdf -l fr -o book.fr.epub -u https://openrouter.ai/api/v1 \
+  -m tencent/hy-mt2-30b-a3b,tencent/hy-mt2-7b,mistralai/mistral-small-3.2-24b-instruct
 ```
 
 Options:
+- `-l french` / `-l fr` → target language (name or ISO code)
+- `-m model1,model2,...` → models to use, in order of preference (see [fallback](#-how-a-book-is-translated))
+- `-u http://localhost:11434` → API endpoint (Ollama by default); a URL ending in `/v1` (e.g. `https://openrouter.ai/api/v1`) uses the OpenAI-compatible `/chat/completions` API
+- `-k <token>` → bearer token for a remote API; prefer the `LLM_API_KEY` environment variable so the key does not show up in your shell history
+- `-p literary` → prompt style (see [Prompt Styles](#%EF%B8%8F-prompt-styles))
 - `--chapter 3` → translate only chapter 3
-- `--workspace` → resume from previous translation progress
-- `--model mistral` → use a specific model
-- `--url http://localhost:11434` → custom API endpoint
-- PDF input is supported via text extraction; the output remains an EPUB (and optional PDF export via `--pdf`)
+- `-w .progress.json` → progress file used to resume an interrupted translation
+- `--chunk-size 6000` → force the max size (chars) sent per request instead of deriving it from the model limits
+- `-o book.fr.epub` → output file
+- `--pdf` → also export the translated EPUB to PDF
+- `--debug` → verbose logs; the last API request and response are written to `debug-lastcall.json` (the API key is not written)
+
+PDF input: the text is extracted with PyMuPDF (`pymupdf`), which rebuilds real paragraphs and words hyphenated across lines or pages (`pypdf` is used if PyMuPDF is not installed, with lower quality). Layout, images and tables are not kept: the output is a single-chapter EPUB.
+
+---
+
+## ⚙️ How a Book Is Translated
+
+1. **Chunk size**: for OpenAI-compatible APIs, the context window and max output tokens of every model are read from the `/models` endpoint. The chunk size is chosen so that the translation fits the output limit and prompt + source + translation fit the context window; with several models the smallest limit wins. Without this information (Ollama), chunks are at most 16,000 chars.
+2. **Chunking**: content is split at HTML tag boundaries (never inside a word) into chunks below that size.
+3. **Validation**: every answer is checked: HTML tags kept, output not truncated by the token limit (`finish_reason=length`), and not much shorter than the source (truncated or summarised output is rejected).
+4. **Per-chunk recovery**, already translated chunks are never redone:
+   - a failing chunk is retried 3 times, then split in half; only that chunk is affected;
+   - if the model keeps failing, **the next model of `-m` is used for that chunk only**, then the following chunks go back to the first model;
+   - an empty answer switches to the next model right away;
+   - a model returning empty answers when given a system prompt is automatically switched to instructions in the user message for the rest of the run.
+5. **Resume**: each translated chunk is saved in the workspace (`-w`, default `.progress.json`). If every model fails on a chunk, the command stops with an error **without writing a partial EPUB**; re-run the same command to resume where it stopped. Changing the models or `--chunk-size` changes the chunks, and the translation then starts over.
 
 ---
 
@@ -101,12 +136,38 @@ To compare model outputs on chapter 3:
 python cli.py --file book.epub -l french -p literary --compare gemma3:1b,mistral:7b --chapter 3 -o model_comparison.md
 ```
 
+---
+
+## 🏆 Model Recommendations
+
+Always give **at least two models** with `-m`: the fallback only costs something on the chunks the first model fails on.
+
+### Remote (OpenRouter)
+
+Recommended for English → French:
+
+```
+-m tencent/hy-mt2-30b-a3b,tencent/hy-mt2-7b,mistralai/mistral-small-3.2-24b-instruct
+```
+
+| Model | Role | Notes |
+|---|---|---|
+| `tencent/hy-mt2-30b-a3b` | main | Dedicated translation model, good literary quality, very cheap ($0.074 / $0.295 per M tokens). Small limits (8,192 tokens context, 4,096 output), so chunks of ~8,500 chars. On some passages the provider returns an **empty answer** (output flagged as reasoning and dropped, still billed): retrying, changing the prompt or `/no_think` does not help, a fallback model is required. |
+| `tencent/hy-mt2-7b` | 1st fallback | Same family and style, same price and limits (chunk size unchanged), fast (~8 s per chunk). Translates the passages the 30B drops. |
+| `mistralai/mistral-small-3.2-24b-instruct` | 2nd fallback | Different model family in case both Hy-MT fail, large context, $0.09 / $0.25 per M tokens. |
+
+A whole book costs a few cents with this setup. `deepseek/deepseek-v3.2` also gives good translations but is slower (~40 s per chunk).
+
+### Local (Ollama)
+
 Our own tests show:
 * **gemma3:1b**: hard to keep HTML structure and follow prompt exactly
 * **other gemma3 models**: all timeout, to be investigated
 * **mistral:7b**: hard to keep HTML structure and follow prompt exactly
 * **mistral-small:24b**: good (but slow)
 * **dorian2b/vera**: works very well on small chunks
+
+Default when `-m` is not given: `mistral-small:24b,dorian2b/vera` (pull both with `ollama pull`).
 
 ---
 
@@ -149,8 +210,9 @@ pytest tests/test_epub_utils.py::TestDRMDetection -v
 
 ## TODO
 - [ ] improve prompts to better handle HTML structure (lots of failures)
-- [ ] add openai-compatible API support
+- [x] add openai-compatible API support
 - [ ] add "literal" translation style
+- [ ] PDF input: keep headings and chapters instead of a single chapter
 
 ## Comparaison des traductions par modèle et prompt
 

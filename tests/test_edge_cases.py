@@ -299,15 +299,10 @@ class TestIntegrationErrorScenarios:
         progress = {}
         
         with patch('libs.translation._translate_once') as mock_translate:
-            # Setup mixed success/failure pattern
-            mock_translate.side_effect = [
-                TranslationError("First attempt fails"),
-                "<body><p>Chunk 1 success</p></body>",
-                TranslationError("Chunk 2 fails"),
-                "<body><p>Chunk 3 success</p></body>"
-            ]
+            # First chunk succeeds, then every attempt fails (retries and splits included)
+            mock_translate.side_effect = ["<p>Chunk 1 success</p>"] + [TranslationError("Chunk fails")] * 100
             
-            # Should raise error when chunking also fails
+            # Should raise error when a chunk keeps failing
             with pytest.raises(TranslationError):
                 result, model_used = translate_with_chunking(
                     "http://localhost:11434", "model", "prompt", 
