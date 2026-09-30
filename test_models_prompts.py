@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Script to test translation quality across different models and prompts
+Script to test translation quality across different models and prompts.
+
+Results are merged into docs/model-prompt-comparison.json, and docs/model-prompt-comparison.md
+is regenerated from all of them: only the models given with --models are (re)tested.
+
+    python test_models_prompts.py                                   # default Ollama models
+    python test_models_prompts.py --models tencent/hy-mt2-7b -u https://openrouter.ai/api/v1
 """
 
+import argparse
 import json
 import os
 import sys
@@ -15,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from libs.prompts import PREDEFINED_PROMPTS
 from libs.translation import translate_with_chunking
+from libs.languages import detect_language
 
 # Texte de test avec des idiomes français
 TEST_TEXT = """<p>Dans le clair-obscur d'un bistrot parisien, le temps semblait s'être mis en grève comme la ligne&nbsp;13 un lundi matin. Adèle, accoudée au comptoir de zinc, tournait distraitement sa cuillère dans un café crème tiède, l'œil perdu entre les volutes de fumée et <em>les souvenirs que la nostalgie elle-même aurait refusés de cautionner</em>.</p>
@@ -29,7 +37,9 @@ TEST_TEXT = """<p>Dans le clair-obscur d'un bistrot parisien, le temps semblait 
 
 <p>Dehors, la pluie tambourinait les pavés comme une vieille rengaine de Renaud, et dans le cœur d'Adèle, c'était tout un refrain de Brassens qui revenait traîner ses godasses, clope au bec.</p>"""
 
-API_BASE = "http://localhost:11434"
+RESULTS_FILE = Path("docs/model-prompt-comparison.json")
+MARKDOWN_FILE = Path("docs/model-prompt-comparison.md")
+SOURCE_LANGUAGE = "fr"
 
 # Default models to test
 DEFAULT_MODELS = [
@@ -43,163 +53,100 @@ DEFAULT_MODELS = [
     "nous-hermes2"
 ]
 
-def translate_text(model: str, prompt: str, text: str) -> str:
+
+def translate_text(model: str, prompt: str, text: str, api_base: str, api_key: str = None) -> str:
     """Traduire un texte avec un modèle et un prompt donnés."""
-    api_base = "http://localhost:11434"  # Use native Ollama API
-    
-    # Format the prompt for the target language
     formatted_prompt = prompt.format(target_language="English")
-    
-    # Create a minimal progress dict for the translation
-    progress = {}
-    
     try:
-        result, model_used = translate_with_chunking(
+        result, _ = translate_with_chunking(
             api_base=api_base,
             models=model,
             prompt=formatted_prompt,
             html=text,
-            progress=progress,
-            debug=False
+            progress={},
+            debug=False,
+            api_key=api_key
         )
         return result
     except Exception as e:
         return f"❌ Error: {str(e)[:100]}..."
 
+
 def escape_markdown(text: str) -> str:
     """Échapper les caractères spéciaux markdown."""
     return text.replace('|', '\\|').replace('\n', ' ').replace('\r', ' ')
 
+
+def cell(translation: str) -> str:
+    """Table cell for a translation, flagging outputs left in the source language."""
+    if not translation.startswith("❌"):
+        from bs4 import BeautifulSoup
+        if detect_language(BeautifulSoup(translation, 'html.parser').get_text()) == SOURCE_LANGUAGE:
+            return "❌ Not translated: the output is the source text"
+    return escape_markdown(translation)
+
+
+def write_markdown(prompt_names: list[str], results: dict) -> None:
+    lines = [
+        "# Comparaison des traductions par modèle et prompt",
+        "",
+        "*Généré par `test_models_prompts.py`. Le texte source est fictif et volontairement riche en idiomes "
+        "français pour tester la capacité de traduction des nuances linguistiques ; langue cible : anglais.*",
+        "",
+        "## Texte original",
+        "",
+        TEST_TEXT,
+        "",
+        "## Traductions",
+        "",
+        "| Modèle | " + " | ".join(prompt_names) + " |",
+        "| --- | " + " | ".join(["---"] * len(prompt_names)) + " |",
+    ]
+    for model, by_prompt in results.items():
+        lines.append("| " + " | ".join([model] + [cell(by_prompt.get(p, "")) for p in prompt_names]) + " |")
+    MARKDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MARKDOWN_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main():
     """Fonction principale."""
+    parser = argparse.ArgumentParser(description="Compare translations across models and prompts")
+    parser.add_argument('--models', help="Comma-separated models to (re)test (default: the Ollama models)")
+    parser.add_argument('-u', '--url', default="http://localhost:11434", help="API base URL")
+    parser.add_argument('-k', '--api-key', default=os.environ.get('LLM_API_KEY'),
+                        help="Bearer token for remote LLM API (or env LLM_API_KEY)")
+    args = parser.parse_args()
+
+    models = [m.strip() for m in args.models.split(',')] if args.models else DEFAULT_MODELS
+    prompt_names = list(PREDEFINED_PROMPTS.keys())
+    data = json.loads(RESULTS_FILE.read_text(encoding="utf-8")) if RESULTS_FILE.exists() else {"results": {}}
+    results = data["results"]
+
     print("🚀 Test de traduction avec différents modèles et prompts")
     print(f"📝 Texte source: {len(TEST_TEXT)} caractères")
-    print(f"🎯 Langue cible: English")
-    print()
-    
-    # Récupérer les modèles et prompts
-    models = DEFAULT_MODELS
-    prompt_names = list(PREDEFINED_PROMPTS.keys())
-    
     print(f"🤖 Modèles à tester: {', '.join(models)}")
     print(f"📋 Prompts à tester: {', '.join(prompt_names)}")
-    print()
-    
-    # Matrice des résultats
-    results = {}
-    
-    total_tests = len(models) * len(prompt_names)
-    current_test = 0
-    
+
     for model in models:
         print(f"🔧 Testing model: {model}")
         results[model] = {}
-        
-        # Test first prompt to see if model is available
-        first_prompt_name = prompt_names[0]
-        first_prompt = PREDEFINED_PROMPTS[first_prompt_name]
-        
-        print(f"  [{current_test + 1}/{total_tests}] {first_prompt_name} (test de disponibilité)")
-        first_translation = translate_text(model, first_prompt, TEST_TEXT)
-        
-        # If first translation failed, skip this model entirely
-        if first_translation.startswith("❌"):
-            print(f"  ⚠️  Modèle {model} indisponible ou défaillant, passage au suivant")
-            # Fill all results for this model with the error
-            for prompt_name in prompt_names:
-                current_test += 1
-                results[model][prompt_name] = first_translation
-            continue
-        
-        # Model works, record first result and continue with remaining prompts
-        results[model][first_prompt_name] = first_translation
-        current_test += 1
-        
-        # Test remaining prompts
-        for prompt_name in prompt_names[1:]:
-            current_test += 1
-            print(f"  [{current_test}/{total_tests}] {prompt_name}")
-            
-            prompt = PREDEFINED_PROMPTS[prompt_name]
-            translation = translate_text(model, prompt, TEST_TEXT)
+        for idx, prompt_name in enumerate(prompt_names):
+            print(f"  {prompt_name}")
+            translation = translate_text(model, PREDEFINED_PROMPTS[prompt_name], TEST_TEXT, args.url, args.api_key)
             results[model][prompt_name] = translation
-            
+            if idx == 0 and translation.startswith("❌"):
+                # First prompt is the availability test: skip a model that does not answer
+                print(f"  ⚠️  Modèle {model} indisponible ou défaillant, passage au suivant")
+                results[model] = {p: translation for p in prompt_names}
+                break
             time.sleep(2)  # Petite pause pour éviter de surcharger l'API
-    
-    # Sauvegarder les résultats complets
-    results_file = Path("test_results.json")
-    with open(results_file, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-    print(f"\n💾 Résultats complets sauvegardés dans {results_file}")
-    
-    # Générer le tableau markdown
-    print("\n📊 Génération du tableau markdown...")
-    
-    markdown_lines = []
-    markdown_lines.append("## Comparaison des traductions par modèle et prompt")
-    markdown_lines.append("")
-    markdown_lines.append("*Note: Le texte source est fictif et volontairement riche en idiomes français pour tester la capacité de traduction des nuances linguistiques.*")
-    markdown_lines.append("")
-    
-    # En-tête du tableau
-    header = "| Modèle | " + " | ".join(prompt_names) + " |"
-    separator = "| --- | " + " | ".join(["---"] * len(prompt_names)) + " |"
-    
-    markdown_lines.append(header)
-    markdown_lines.append(separator)
-    
-    # Lignes du tableau
-    for model in models:
-        row_parts = [model]
-        for prompt_name in prompt_names:
-            translation = results[model][prompt_name]
-            escaped = escape_markdown(translation)
-            row_parts.append(escaped)
-        
-        row = "| " + " | ".join(row_parts) + " |"
-        markdown_lines.append(row)
-    
-    markdown_content = "\n".join(markdown_lines)
-    
-    # Ajouter au README.md
-    readme_path = Path("README.md")
-    if readme_path.exists():
-        with open(readme_path, 'r', encoding='utf-8') as f:
-            current_content = f.read()
-        
-        # Chercher s'il y a déjà une section de comparaison
-        if "## Comparaison des traductions par modèle et prompt" in current_content:
-            # Remplacer l'ancienne section
-            lines = current_content.split('\n')
-            new_lines = []
-            skip = False
-            
-            for line in lines:
-                if line.startswith("## Comparaison des traductions par modèle et prompt"):
-                    skip = True
-                elif line.startswith("## ") and skip:
-                    skip = False
-                    new_lines.append(line)
-                elif not skip:
-                    new_lines.append(line)
-            
-            new_content = '\n'.join(new_lines) + "\n\n" + markdown_content + "\n"
-        else:
-            # Ajouter à la fin
-            new_content = current_content.rstrip() + "\n\n" + markdown_content + "\n"
-        
-        with open(readme_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        
-        print(f"✅ Tableau ajouté au {readme_path}")
-    else:
-        # Créer un nouveau README avec juste le tableau
-        with open(readme_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content + "\n")
-        print(f"✅ Nouveau {readme_path} créé avec le tableau")
-    
-    print("\n🎉 Test terminé !")
-    print(f"📄 Consulter {readme_path} pour voir le tableau de comparaison")
+
+    RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RESULTS_FILE.write_text(json.dumps({"prompts": prompt_names, "results": results}, indent=2,
+                                       ensure_ascii=False) + "\n", encoding="utf-8")
+    write_markdown(prompt_names, results)
+    print(f"✅ Résultats dans {RESULTS_FILE} et {MARKDOWN_FILE}")
+
 
 if __name__ == "__main__":
     main()
