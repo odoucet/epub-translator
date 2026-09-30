@@ -12,6 +12,14 @@ def no_retry_delay(monkeypatch):
     monkeypatch.setattr('libs.translation.CHUNK_RETRY_DELAY', 0)
 
 
+@pytest.fixture(autouse=True)
+def fresh_model_state(monkeypatch):
+    """Reset the per-run model state learned by the translation module."""
+    monkeypatch.setattr('libs.translation._MODEL_STATS', {})
+    monkeypatch.setattr('libs.translation._DEMOTED_MODELS', set())
+    monkeypatch.setattr('libs.translation._NO_SYSTEM_PROMPT_MODELS', set())
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""

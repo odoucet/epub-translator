@@ -20,8 +20,10 @@ from libs.epub_utils import (
 )
 from libs.translation import (
     translate_with_chunking, TranslationError, get_model_limits, compute_max_chunk_chars,
-    split_within_limit, extract_html_structure, MAX_SINGLE_REQUEST_CHARS
+    split_within_limit, extract_html_structure, MAX_SINGLE_REQUEST_CHARS, find_short_translations,
+    text_length, RETRY_TEMPERATURES
 )
+from libs.languages import detect_language, expected_length_ratio
 from libs.notes import convert_translator_notes_to_footnotes
 from libs.prompts import PREDEFINED_PROMPTS
 
@@ -195,7 +197,8 @@ def run_model_translation(model_name: str, chapter: int, lang: str, epub_file: P
 
 def translate_with_fallback(models: list[str], prompt: str, url: str, html: str, 
                            progress: dict, debug: bool = False, chapter_info: str = None,
-                           api_key: str = None, max_chunk_chars: int = None) -> tuple[str, str]:
+                           api_key: str = None, max_chunk_chars: int = None, expected_ratio: float = None,
+                           min_temperature: float = 0) -> tuple[str, str]:
     """
     Translate using multiple models with intelligent chunking and fallback.
     Returns (translated_html, successful_model_name)
@@ -206,7 +209,9 @@ def translate_with_fallback(models: list[str], prompt: str, url: str, html: str,
         logger.info("Starting translation with models: %s", ", ".join(models))
         translated, successful_model = translate_with_chunking(url, models, prompt, html, progress, 
                                                              debug=debug, chapter_info=chapter_info,
-                                                             api_key=api_key, max_chunk_chars=max_chunk_chars)
+                                                             api_key=api_key, max_chunk_chars=max_chunk_chars,
+                                                             expected_ratio=expected_ratio,
+                                                             min_temperature=min_temperature)
         logger.info("✅ Translation successful with model: %s", successful_model)
         return translated, successful_model
         
@@ -232,8 +237,64 @@ def resolve_max_chunk_chars(models: list[str], url: str, prompt: str, api_key: s
     return min(sizes) if sizes else None
 
 
+def resolve_expected_ratio(source_lang: str | None, target_lang: str, sample_text: str) -> float | None:
+    """Expected translated/source length ratio, detecting the source language when not given."""
+    logger = logging.getLogger(__name__)
+    source = normalize_language(source_lang) if source_lang else detect_language(sample_text)
+    target = normalize_language(target_lang)
+    ratio = expected_length_ratio(source, target)
+    if ratio:
+        logger.info("🌐 %s -> %s: translation expected about x%.2f the source length", source, target, ratio)
+    else:
+        logger.info("🌐 Language pair %s -> %s unknown: only the final pass checks translation lengths",
+                    source or '?', target)
+    return ratio
+
+
+def final_length_pass(entries: list[tuple[str, str]], trans_map: dict, prog: dict, models: list[str],
+                      retranslate, save) -> None:
+    """
+    Retranslate the chunks noticeably shorter than the rest of the book (likely omissions),
+    starting with the fallback model and a non-zero temperature, keeping the longest valid version.
+
+    entries: (progress key, source html) of the translated chunks
+    retranslate: callable(source_html, models) -> translated html, may raise TranslationError
+    save: callable() persisting the progress
+    """
+    logger = logging.getLogger(__name__)
+    checked = prog.setdefault('final_pass_checked', [])
+    entries = [(key, source) for key, source in entries if key in trans_map]
+    suspicious = [i for i in find_short_translations([(source, trans_map[key]) for key, source in entries])
+                  if entries[i][0] not in checked]
+    if not suspicious:
+        return
+    logger.info("🔁 Final pass: %d chunks noticeably shorter than the rest of the book, retranslating them",
+                len(suspicious))
+    retry_models = models[1:] + models[:1]
+    for n, i in enumerate(suspicious, 1):
+        key, source = entries[i]
+        old_ratio = text_length(trans_map[key]) / text_length(source)
+        try:
+            new = retranslate(source, retry_models)
+        except TranslationError as e:
+            logger.warning("Final pass %d/%d: retranslation failed, keeping the first version: %s",
+                           n, len(suspicious), e)
+            continue
+        new_ratio = text_length(new) / text_length(source)
+        if new_ratio > old_ratio:
+            trans_map[key] = new
+            logger.info("Final pass %d/%d: kept the new translation (length ratio %.2f -> %.2f)",
+                        n, len(suspicious), old_ratio, new_ratio)
+        else:
+            logger.warning("Final pass %d/%d: new translation not longer (%.2f vs %.2f), keeping the first one",
+                           n, len(suspicious), new_ratio, old_ratio)
+        checked.append(key)
+        save()
+
+
 def translate_pdf_html(html: str, models: list[str], prompt: str, url: str, workspace: Path,
-                       max_chunk_chars: int = None, debug: bool = False, api_key: str = None) -> str | None:
+                       max_chunk_chars: int = None, debug: bool = False, api_key: str = None,
+                       expected_ratio: float = None) -> str | None:
     """
     Translate the PDF body chunk by chunk, saving each translated chunk in the progress file
     so that an interrupted run resumes where it stopped. Returns None on failure.
@@ -257,7 +318,7 @@ def translate_pdf_html(html: str, models: list[str], prompt: str, url: str, work
                 translated, _ = translate_with_fallback(
                     models, prompt, url, prefix + chunk + suffix, {}, debug=debug,
                     chapter_info=f"PDF chunk {i+1}/{len(body_chunks)}", api_key=api_key,
-                    max_chunk_chars=max_chunk_chars
+                    max_chunk_chars=max_chunk_chars, expected_ratio=expected_ratio
                 )
             except TranslationError:
                 logger.error("💾 Progress saved in %s (%d/%d chunks): re-run the same command to resume",
@@ -265,9 +326,19 @@ def translate_pdf_html(html: str, models: list[str], prompt: str, url: str, work
                 return None
             trans_map[key] = extract_html_structure(translated)[1]
             save_progress(workspace, prog)
-        translated_parts.append(trans_map[key])
 
-    return prefix + ''.join(translated_parts) + suffix
+    def retranslate(chunk, retry_models):
+        translated, _ = translate_with_fallback(
+            retry_models, prompt, url, prefix + chunk + suffix, {}, debug=debug, chapter_info="Final pass",
+            api_key=api_key, max_chunk_chars=max_chunk_chars, expected_ratio=expected_ratio,
+            min_temperature=RETRY_TEMPERATURES[1]
+        )
+        return extract_html_structure(translated)[1]
+
+    final_length_pass([(hash_key(chunk), chunk) for chunk in body_chunks], trans_map, prog, models,
+                      retranslate, lambda: save_progress(workspace, prog))
+
+    return prefix + ''.join(trans_map[hash_key(chunk)] for chunk in body_chunks) + suffix
 
 
 def write_markdown(out_file: Path, original: str, model_data: dict):
@@ -319,6 +390,8 @@ def main():
     parser.add_argument('-u', '--url', default='http://localhost:11434', help="API base URL")
     parser.add_argument('-k', '--api-key', default=os.environ.get('LLM_API_KEY'),
                        help="Bearer token for remote LLM API (or env LLM_API_KEY)")
+    parser.add_argument('-s', '--source-lang',
+                       help="Source language (name or ISO code), detected from the text when not given")
     parser.add_argument('-w', '--workspace', default='.progress.json', help="Progress file")
     parser.add_argument('--chunk-size', type=int,
                        help="Max chars sent per request (default: derived from the model token limits)")
@@ -396,9 +469,10 @@ def main():
 
         html = pdf_to_html(text)
         max_chunk_chars = resolve_max_chunk_chars(model_list, args.url, prompt, args.api_key, args.chunk_size)
+        expected_ratio = resolve_expected_ratio(args.source_lang, args.lang, text)
         translated = translate_pdf_html(html, model_list, prompt, args.url, Path(args.workspace),
                                         max_chunk_chars=max_chunk_chars, debug=args.debug,
-                                        api_key=args.api_key)
+                                        api_key=args.api_key, expected_ratio=expected_ratio)
         if translated is None:
             return 1
 
@@ -431,6 +505,9 @@ def main():
         logger.error("No content to translate")
         return
     max_chunk_chars = resolve_max_chunk_chars(model_list, args.url, prompt, args.api_key, args.chunk_size)
+    expected_ratio = resolve_expected_ratio(
+        args.source_lang, args.lang, ' '.join(BeautifulSoup(raw, 'html.parser').get_text() for _, raw in chunks[:5])
+    )
     
     # Determine chapter context for logging
     if args.chapter:
@@ -476,7 +553,7 @@ def main():
             translated, successful_model = translate_with_fallback(
                 model_list, prompt, args.url, raw.decode('utf-8'), prog, 
                 debug=args.debug, chapter_info=chapter_info, api_key=args.api_key,
-                max_chunk_chars=max_chunk_chars
+                max_chunk_chars=max_chunk_chars, expected_ratio=expected_ratio
             )
             logger.info("✅ Chunk translated successfully with model: %s", successful_model)
             
@@ -492,6 +569,20 @@ def main():
         save_progress(workspace, prog)
         bar.update()
     bar.close()
+
+    def retranslate(raw_html, retry_models):
+        translated, _ = translate_with_fallback(
+            retry_models, prompt, args.url, raw_html, prog, debug=args.debug, chapter_info="Final pass",
+            api_key=args.api_key, max_chunk_chars=max_chunk_chars, expected_ratio=expected_ratio,
+            min_temperature=RETRY_TEMPERATURES[1]
+        )
+        trans_html, notes = convert_translator_notes_to_footnotes(translated)
+        return trans_html + ''.join(notes)
+
+    entries = [(hash_key(BeautifulSoup(raw, 'html.parser').get_text().strip()), raw.decode('utf-8'))
+               for _, raw in chunks]
+    prog['translated'] = trans_map
+    final_length_pass(entries, trans_map, prog, model_list, retranslate, lambda: save_progress(workspace, prog))
 
     injected = inject_translations(chunks, trans_map)
     out_epub = Path(args.output_file or f"{Path(args.file).stem}.{lang_code}.epub")

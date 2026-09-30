@@ -520,3 +520,44 @@ class TestTranslatePdfHtml:
         assert mock_translate.call_count == 4
         assert result.startswith("<html><body><p>Partie 0")
         assert result.count("<p>Partie") == 3
+
+
+class TestFinalLengthPass:
+    """Test the final pass retranslating chunks shorter than the rest of the book."""
+
+    def _entries(self):
+        source = "<p>" + "x" * 1000 + "</p>"
+        entries = [(f"k{i}", source) for i in range(7)]
+        trans_map = {f"k{i}": "<p>" + "y" * 1150 + "</p>" for i in range(6)}
+        trans_map["k6"] = "<p>" + "y" * 800 + "</p>"
+        return entries, trans_map
+
+    def test_short_chunk_retranslated_with_fallback_first(self):
+        """Test that only the short chunk is retranslated, fallback model first, and the longer version kept."""
+        from cli import final_length_pass
+        entries, trans_map = self._entries()
+        prog, saves, calls = {}, [], []
+
+        def retranslate(source, models):
+            calls.append(models)
+            return "<p>" + "z" * 1100 + "</p>"
+
+        final_length_pass(entries, trans_map, prog, ["main", "fallback"], retranslate, lambda: saves.append(1))
+
+        assert calls == [["fallback", "main"]]
+        assert trans_map["k6"].count("z") == 1100
+        assert prog["final_pass_checked"] == ["k6"] and saves
+
+        # Already checked: a resumed run does not retranslate it again
+        trans_map["k6"] = "<p>" + "y" * 800 + "</p>"
+        final_length_pass(entries, trans_map, prog, ["main", "fallback"], retranslate, lambda: None)
+        assert len(calls) == 1
+
+    def test_shorter_retranslation_discarded(self):
+        """Test that the first translation is kept when the new one is not longer."""
+        from cli import final_length_pass
+        entries, trans_map = self._entries()
+
+        final_length_pass(entries, trans_map, {}, ["main"], lambda s, m: "<p>" + "z" * 500 + "</p>", lambda: None)
+
+        assert trans_map["k6"].count("y") == 800

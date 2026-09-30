@@ -30,6 +30,15 @@ MIN_CHUNK_SIZE = 2000
 CHUNK_ATTEMPTS = 3
 # Base delay in seconds between attempts, multiplied by the attempt number
 CHUNK_RETRY_DELAY = 5
+# Temperature of each attempt: a retry at temperature 0 with the same seed gives the same answer
+RETRY_TEMPERATURES = (0, 0.3, 0.6)
+# With a known language pair, reject translations shorter than this share of the expected length
+LENGTH_TOLERANCE = 0.8
+# Final pass: retranslate chunks whose length ratio is below this share of the book median ratio
+FINAL_PASS_TOLERANCE = 0.85
+# A model returning empty outputs this often (after enough calls) is moved after the other models
+DEMOTE_EMPTY_RATE = 0.3
+DEMOTE_MIN_CALLS = 10
 
 class TranslationError(Exception):
     pass
@@ -41,6 +50,49 @@ class EmptyOutputError(TranslationError):
 
 # Models that return an empty output when given a system prompt, detected at runtime
 _NO_SYSTEM_PROMPT_MODELS = set()
+# Per-model call statistics for this run: {model: {'calls': n, 'empty': n}}
+_MODEL_STATS = {}
+# Models already moved after the others for returning too many empty outputs
+_DEMOTED_MODELS = set()
+
+
+def _record_call(model: str, empty: bool) -> None:
+    stats = _MODEL_STATS.setdefault(model, {'calls': 0, 'empty': 0})
+    stats['calls'] += 1
+    stats['empty'] += int(empty)
+
+
+def order_models(model_list: list[str]) -> list[str]:
+    """Move the models returning too many empty outputs after the others, keeping the given order otherwise."""
+    for model in model_list:
+        stats = _MODEL_STATS.get(model)
+        if (model not in _DEMOTED_MODELS and len(model_list) > 1 and stats and stats['calls'] >= DEMOTE_MIN_CALLS
+                and stats['empty'] / stats['calls'] >= DEMOTE_EMPTY_RATE):
+            _DEMOTED_MODELS.add(model)
+            logger.warning("%s returned an empty output for %d of its %d calls: using it after the other models "
+                           "for the rest of the run", model, stats['empty'], stats['calls'])
+    return [m for m in model_list if m not in _DEMOTED_MODELS] + [m for m in model_list if m in _DEMOTED_MODELS]
+
+
+def text_length(html: str) -> int:
+    return len(BeautifulSoup(html, 'html.parser').get_text(strip=True))
+
+
+def find_short_translations(pairs: list[tuple[str, str]]) -> list[int]:
+    """
+    Indexes of the (source, translation) pairs noticeably shorter than the rest of the book,
+    relative to the median length ratio: likely omissions, whatever the language pair.
+    """
+    ratios = {}
+    for i, (source, translation) in enumerate(pairs):
+        source_len = text_length(source)
+        if source_len >= MIN_TEXT_FOR_RATIO_CHECK:
+            ratios[i] = text_length(translation) / source_len
+    if len(ratios) < 5:
+        return []
+    ordered = sorted(ratios.values())
+    median = ordered[len(ordered) // 2]
+    return [i for i, ratio in ratios.items() if ratio < median * FINAL_PASS_TOLERANCE]
 
 
 def is_openai_compatible(api_base: str) -> bool:
@@ -140,9 +192,10 @@ def wrap_html_content(body_content: str, prefix: str, suffix: str) -> str:
     return prefix + body_content + suffix
 
 
-def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
+def validate_translation(orig: str, trans: str, expected_ratio: float = None) -> tuple[bool, str, str]:
     """
     Validate translation and clean up backticks if present.
+    expected_ratio: expected translated/source length ratio for the language pair, when known
 
     Returns:
         tuple[bool, str, str]: (is_valid, error_message_or_cleaned_content, cleaned_content)
@@ -195,7 +248,8 @@ def validate_translation(orig: str, trans: str) -> tuple[bool, str, str]:
 
     # Detect truncated or summarised output: a real translation keeps roughly the same amount of text
     orig_text_len = len(BeautifulSoup(orig, 'html.parser').get_text(strip=True))
-    if orig_text_len >= MIN_TEXT_FOR_RATIO_CHECK and trans_text_len < orig_text_len * MIN_TRANSLATION_RATIO:
+    min_ratio = expected_ratio * LENGTH_TOLERANCE if expected_ratio else MIN_TRANSLATION_RATIO
+    if orig_text_len >= MIN_TEXT_FOR_RATIO_CHECK and trans_text_len < orig_text_len * min_ratio:
         return False, (f"Translation too short compared to original ({trans_text_len} vs {orig_text_len} chars), "
                        "probably truncated or summarised"), trans
 
@@ -354,7 +408,8 @@ def split_within_limit(html: str, target_size: int, limit: int) -> list[str]:
 
 def translate_with_chunking(api_base: str, models: str | list[str], prompt: str, html: str, progress: dict, 
                           debug: bool = False, chapter_info: str = None, api_key: str = None,
-                          max_chunk_chars: int = None) -> tuple[str, str]:
+                          max_chunk_chars: int = None, expected_ratio: float = None,
+                          min_temperature: float = 0) -> tuple[str, str]:
     """
     Translate HTML with intelligent chunking and model fallback.
     
@@ -368,6 +423,8 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
         chapter_info: Optional chapter context for logging (e.g., "Chapter 1/5")
         api_key: Optional bearer token for remote APIs
         max_chunk_chars: Largest body size sent in one request, derived from the model token limits
+        expected_ratio: Expected translated/source length ratio for the language pair, when known
+        min_temperature: Lowest sampling temperature, raised for a new attempt on an already translated text
         
     Returns:
         tuple[str, str]: (translated_html, successful_model_name)
@@ -378,7 +435,7 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     if isinstance(models, str):
         model_list = [models]
     else:
-        model_list = models
+        model_list = order_models(models)
     
     # Create chapter prefix for logging
     chapter_prefix = f"{chapter_info} " if chapter_info else ""
@@ -391,16 +448,25 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     logger.debug("%sExtracted structure: prefix=%d chars, body=%d chars, suffix=%d chars", 
                 chapter_prefix, len(prefix), len(body_content), len(suffix))
     
-    # Try full translation first with the primary model - only send body content
+    # Try full translation first - only send body content
     if len(body_content) <= request_limit:
-        try:
-            logger.debug("%sAttempting full translation with %s", chapter_prefix, model_list[0])
-            translated_body = _translate_once(api_base, model_list[0], prompt, body_content, debug, chapter_info,
-                                              api_key=api_key)
-            logger.debug("%sFull translation successful with %s", chapter_prefix, model_list[0])
-            return wrap_html_content(translated_body, prefix, suffix), model_list[0]
-        except TranslationError as e:
-            logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model_list[0], e)
+        for model_idx, model in enumerate(model_list):
+            try:
+                logger.debug("%sAttempting full translation with %s", chapter_prefix, model)
+                translated_body = _translate_once(api_base, model, prompt, body_content, debug, chapter_info,
+                                                  api_key=api_key, temperature=min_temperature,
+                                                  expected_ratio=expected_ratio)
+                logger.debug("%sFull translation successful with %s", chapter_prefix, model)
+                return wrap_html_content(translated_body, prefix, suffix), model
+            except EmptyOutputError as e:
+                # The provider dropped the output: the next model is cheaper than splitting the chunk
+                logger.warning("%sFull translate with %s returned an empty output: %s", chapter_prefix, model, e)
+                if model_idx == len(model_list) - 1:
+                    break
+                logger.info("%sTrying the full translation with the next model", chapter_prefix)
+            except TranslationError as e:
+                logger.warning("%sFull translate with %s failed: %s", chapter_prefix, model, e)
+                break
     else:
         logger.info("%sContent too large for a single request (%d chars), using chunks",
                     chapter_prefix, len(body_content))
@@ -423,7 +489,8 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     for i, body_chunk in enumerate(body_chunks):
         chunk_label = f"Chunk {i+1}/{len(body_chunks)}"
         translated_body, used_model = _translate_chunk_resilient(
-            api_base, model_list, prompt, body_chunk, debug, chapter_info, chunk_label, api_key
+            api_base, order_models(model_list), prompt, body_chunk, debug, chapter_info, chunk_label, api_key,
+            expected_ratio=expected_ratio, min_temperature=min_temperature
         )
         translated_parts.append(translated_body)
         models_used.append(used_model)
@@ -433,13 +500,14 @@ def translate_with_chunking(api_base: str, models: str | list[str], prompt: str,
     logger.info("%sRemembering successful chunk size: %d chars for future chapters", chapter_prefix, chunk_size)
 
     # Report the model that translated most of the content
-    main_model = max(model_list, key=models_used.count)
+    main_model = max(set(models_used), key=models_used.count)
     return wrap_html_content(''.join(translated_parts), prefix, suffix), main_model
 
 
 def _translate_chunk_resilient(api_base: str, model_list: list[str], prompt: str, body_chunk: str,
                                debug: bool, chapter_info: str, chunk_label: str,
-                               api_key: str = None) -> tuple[str, str]:
+                               api_key: str = None, expected_ratio: float = None,
+                               min_temperature: float = 0) -> tuple[str, str]:
     """
     Translate one chunk, never restarting already translated chunks:
     retry the same chunk, then split only this chunk in half, then fall back to the next model.
@@ -451,8 +519,12 @@ def _translate_chunk_resilient(api_base: str, model_list: list[str], prompt: str
         for attempt in range(1, CHUNK_ATTEMPTS + 1):
             chunk_start = time.time()
             try:
+                # Vary the sampling on retries, the same request at temperature 0 gives the same answer
+                temperature = max(min_temperature, RETRY_TEMPERATURES[min(attempt, len(RETRY_TEMPERATURES)) - 1])
                 translated_body = _translate_once(api_base, model, prompt, body_chunk, debug,
-                                                  chapter_info, chunk_label, api_key=api_key)
+                                                  chapter_info, chunk_label, api_key=api_key,
+                                                  temperature=temperature, seed=100 + attempt,
+                                                  expected_ratio=expected_ratio)
                 chunk_elapsed = time.time() - chunk_start
                 chars_per_min = int((len(body_chunk) * 60) / chunk_elapsed) if chunk_elapsed > 0 else 0
                 logger.info("%s%s ✅ %s - %.1fs (%d chars/min) - %d chars",
@@ -482,7 +554,8 @@ def _translate_chunk_resilient(api_base: str, model_list: list[str], prompt: str
                 for j, sub_chunk in enumerate(sub_chunks):
                     sub_body, sub_model = _translate_chunk_resilient(
                         api_base, model_list[model_idx:], prompt, sub_chunk, debug, chapter_info,
-                        f"{chunk_label}.{j+1}", api_key
+                        f"{chunk_label}.{j+1}", api_key, expected_ratio=expected_ratio,
+                        min_temperature=min_temperature
                     )
                     parts.append(sub_body)
                     sub_models.append(sub_model)
@@ -496,7 +569,8 @@ def _translate_chunk_resilient(api_base: str, model_list: list[str], prompt: str
 
 
 def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: bool = False, 
-                   chapter_info: str = None, chunk_info: str = None, api_key: str = None) -> str:
+                   chapter_info: str = None, chunk_info: str = None, api_key: str = None,
+                   temperature: float = 0, seed: int = 101, expected_ratio: float = None) -> str:
     """
     Make a single translation request. No retries - if it fails, let the caller handle it.
     
@@ -509,6 +583,9 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
         chapter_info: Optional chapter context (e.g., "Chapter 1/5")
         chunk_info: Optional chunk context (e.g., "Chunk 1/5")
         api_key: Optional bearer token sent as Authorization header
+        temperature: Sampling temperature (0 for the most faithful and reproducible translation)
+        seed: Sampling seed
+        expected_ratio: Expected translated/source length ratio for the language pair, when known
     """
     base = api_base.rstrip('/')
     openai_compat = is_openai_compatible(base)
@@ -537,9 +614,9 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
         'stream':False
     }
     if openai_compat:
-        payload.update({'seed':101,'temperature':0})
+        payload.update({'seed':seed,'temperature':temperature})
     else:
-        payload['options'] = {'seed':101,'temperature':0}
+        payload['options'] = {'seed':seed,'temperature':temperature}
     headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
     
     # Write debug info to file if debug mode is enabled
@@ -615,7 +692,8 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
                 logger.warning("%sEmpty output from %s with a system prompt, retrying with instructions "
                                "in the user message (kept for the rest of the run)", context_prefix, model)
                 _NO_SYSTEM_PROMPT_MODELS.add(model)
-                return _translate_once(api_base, model, prompt, block, debug, chapter_info, chunk_info, api_key)
+                return _translate_once(api_base, model, prompt, block, debug, chapter_info, chunk_info, api_key,
+                                       temperature=temperature, seed=seed, expected_ratio=expected_ratio)
 
             if 'content' not in message or message['content'] is None:
                 # Providers (e.g. OpenRouter) report upstream failures as a null content with an error field
@@ -634,7 +712,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
                 raise EmptyOutputError("Empty response from API")
             
             # Validate the translation
-            valid, error_cleaned, cleaned_content = validate_translation(block, content)
+            valid, error_cleaned, cleaned_content = validate_translation(block, content, expected_ratio)
 
             if not valid:
                 logger.debug("%sValidation failed: %s", context_prefix, error_cleaned)
@@ -646,6 +724,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             content = cleaned_content
             
             logger.debug("%sTranslation successful, content length: %d chars", context_prefix, len(content))
+            _record_call(model, empty=False)
             return content
             
         except (KeyError, ValueError, TypeError) as json_err:
@@ -654,6 +733,7 @@ def _translate_once(api_base: str, model: str, prompt: str, block: str, debug: b
             
     except EmptyOutputError as e:
         logger.error("%sTranslation request failed: %s", context_prefix, e)
+        _record_call(model, empty=True)
         raise
     except Exception as e:
         logger.error("%sTranslation request failed: %s", context_prefix, e)

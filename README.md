@@ -99,6 +99,7 @@ python cli.py -f book.pdf -l fr -o book.fr.epub -u https://openrouter.ai/api/v1 
 
 Options:
 - `-l french` / `-l fr` → target language (name or ISO code)
+- `-s english` / `-s en` → source language, detected from the text when not given (used to check translation lengths)
 - `-m model1,model2,...` → models to use, in order of preference (see [fallback](#-how-a-book-is-translated))
 - `-u http://localhost:11434` → API endpoint (Ollama by default); a URL ending in `/v1` (e.g. `https://openrouter.ai/api/v1`) uses the OpenAI-compatible `/chat/completions` API
 - `-k <token>` → bearer token for a remote API; prefer the `LLM_API_KEY` environment variable so the key does not show up in your shell history
@@ -118,13 +119,15 @@ PDF input: the text is extracted with PyMuPDF (`pymupdf`), which rebuilds real p
 
 1. **Chunk size**: for OpenAI-compatible APIs, the context window and max output tokens of every model are read from the `/models` endpoint. The chunk size is chosen so that the translation fits the output limit and prompt + source + translation fit the context window; with several models the smallest limit wins. Without this information (Ollama), chunks are at most 16,000 chars.
 2. **Chunking**: content is split at HTML tag boundaries (never inside a word) into chunks below that size.
-3. **Validation**: every answer is checked: HTML tags kept, output not truncated by the token limit (`finish_reason=length`), and not much shorter than the source (truncated or summarised output is rejected).
+3. **Validation**: every answer is checked: HTML tags kept, output not truncated by the token limit (`finish_reason=length`), and not too short. Models sometimes silently drop the end of a chunk: with a known language pair (en, fr, de, es, it, pt, ja, zh), a translation below 80% of the expected length is rejected (e.g. English → French is expected around x1.15, so below x0.92 is rejected); otherwise below half the source length.
 4. **Per-chunk recovery**, already translated chunks are never redone:
-   - a failing chunk is retried 3 times, then split in half; only that chunk is affected;
+   - a failing chunk is retried 3 times with a rising temperature (0, 0.3, 0.6) and a new seed, since the same request at temperature 0 gives the same answer; then it is split in half, only that chunk is affected;
    - if the model keeps failing, **the next model of `-m` is used for that chunk only**, then the following chunks go back to the first model;
-   - an empty answer switches to the next model right away;
+   - an empty answer switches to the next model right away, for the whole chunk before any splitting;
+   - a model returning an empty answer for 30% or more of its calls (after 10 calls) is moved after the other models for the rest of the run;
    - a model returning empty answers when given a system prompt is automatically switched to instructions in the user message for the rest of the run.
-5. **Resume**: each translated chunk is saved in the workspace (`-w`, default `.progress.json`). If every model fails on a chunk, the command stops with an error **without writing a partial EPUB**; re-run the same command to resume where it stopped. Changing the models or `--chunk-size` changes the chunks, and the translation then starts over.
+5. **Final pass**: once every chunk is translated, chunks whose length ratio is below 85% of the book median are retranslated, starting with the next model of `-m` and a temperature of 0.3; the new version is kept only if it is longer. This catches omissions whatever the language pair.
+6. **Resume**: each translated chunk is saved in the workspace (`-w`, default `.progress.json`). If every model fails on a chunk, the command stops with an error **without writing a partial EPUB**; re-run the same command to resume where it stopped. Changing the models or `--chunk-size` changes the chunks, and the translation then starts over.
 
 ---
 
@@ -144,7 +147,7 @@ Always give **at least two models** with `-m`: the fallback only costs something
 
 ### Remote (OpenRouter)
 
-Recommended for English → French:
+Recommended for English → French, tested on a full non-fiction book (~1M chars, 150 chunks):
 
 ```
 -m tencent/hy-mt2-30b-a3b,tencent/hy-mt2-7b,mistralai/mistral-small-3.2-24b-instruct
@@ -156,7 +159,7 @@ Recommended for English → French:
 | `tencent/hy-mt2-7b` | 1st fallback | Same family and style, same price and limits (chunk size unchanged), fast (~8 s per chunk). Translates the passages the 30B drops. |
 | `mistralai/mistral-small-3.2-24b-instruct` | 2nd fallback | Different model family in case both Hy-MT fail, large context, $0.09 / $0.25 per M tokens. |
 
-A whole book costs a few cents with this setup. `deepseek/deepseek-v3.2` also gives good translations but is slower (~40 s per chunk).
+On that book: about 1 hour, **$0.19 in total** (failed attempts and diagnostics included), no chunk lost. The 30B returned an empty answer about once every three chunks, all recovered by the 7B; the final pass found and fixed 6 chunks with omissions, one of them needing Mistral for its last part. `deepseek/deepseek-v3.2` also gives good translations but is slower (~40 s per chunk).
 
 ### Local (Ollama)
 
