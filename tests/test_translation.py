@@ -6,7 +6,8 @@ import requests
 
 from libs.translation import (
     TranslationError, EmptyOutputError, validate_translation, dynamic_chunks,
-    translate_with_chunking, _translate_once, get_model_limits, compute_max_chunk_chars
+    translate_with_chunking, _translate_once, get_model_limits, compute_max_chunk_chars,
+    order_models, find_short_translations, _record_call
 )
 
 
@@ -600,3 +601,74 @@ class TestModelLimits:
         sent = [call.args[3] for call in mock_translate.call_args_list]
         assert len(sent) > 1
         assert all(len(block) <= 3100 for block in sent)
+
+
+class TestLengthChecks:
+    """Test language-aware length validation and the detection of short translations."""
+
+    def test_expected_ratio_rejects_omission(self):
+        """Test that a translation well below the expected length for the language pair is rejected."""
+        original = "".join(f"<p>Paragraph {i} with a fair amount of original text inside.</p>" for i in range(20))
+        # 80% of the source length: fine without language pair, too short for English -> French (x1.15)
+        translation = original[:int(len(original) * 0.8)].rsplit("</p>", 1)[0] + "</p>"
+
+        assert validate_translation(original, translation)[0] is True
+        is_valid, error, _ = validate_translation(original, translation, expected_ratio=1.15)
+        assert is_valid is False
+        assert "too short" in error
+
+    def test_find_short_translations(self):
+        """Test that chunks well below the book median length ratio are reported."""
+        source = "<p>" + "x" * 1000 + "</p>"
+        pairs = [(source, "<p>" + "y" * 1150 + "</p>")] * 6 + [(source, "<p>" + "y" * 850 + "</p>")]
+
+        assert find_short_translations(pairs) == [6]
+        assert find_short_translations(pairs[:3]) == []
+
+
+class TestModelOrdering:
+    """Test retries and model order adjustments."""
+
+    def test_model_with_many_empty_outputs_is_demoted(self):
+        """Test that a model returning too many empty outputs is moved after the others."""
+        for i in range(10):
+            _record_call("m1", empty=i < 4)
+
+        assert order_models(["m1", "m2"]) == ["m2", "m1"]
+        assert order_models(["m2", "m1"]) == ["m2", "m1"]
+
+    def test_model_with_few_empty_outputs_keeps_its_place(self):
+        """Test that occasional empty outputs do not change the model order."""
+        for i in range(10):
+            _record_call("m1", empty=i < 2)
+
+        assert order_models(["m1", "m2"]) == ["m1", "m2"]
+
+    @patch('libs.translation._translate_once')
+    def test_full_empty_output_tries_next_model_before_splitting(self, mock_translate):
+        """Test that an empty output on a whole chunk goes to the next model without splitting it."""
+        def fake(api_base, model, prompt, block, *args, **kwargs):
+            if model == "m1":
+                raise EmptyOutputError("empty")
+            return "<p>traduit</p>"
+        mock_translate.side_effect = fake
+        body = "".join(f"<p>Part {i} {'x' * 1500}</p>" for i in range(4))
+
+        result, model_used = translate_with_chunking("http://localhost:11434", ["m1", "m2"], "prompt", body, {})
+
+        assert [call.args[1] for call in mock_translate.call_args_list] == ["m1", "m2"]
+        assert model_used == "m2"
+        assert result == "<p>traduit</p>"
+
+    @patch('libs.translation._translate_once')
+    def test_retries_raise_temperature(self, mock_translate):
+        """Test that each attempt uses a higher temperature and a different seed."""
+        mock_translate.side_effect = [TranslationError("bad"), TranslationError("bad"), "<p>ok</p>", "<p>ok</p>"]
+        # Above MAX_SINGLE_REQUEST_CHARS: no full translation attempt, two chunks
+        body = "".join(f"<p>Part {i} {'x' * 1500}</p>" for i in range(12))
+
+        translate_with_chunking("http://localhost:11434", "m1", "prompt", body, {})
+
+        calls = mock_translate.call_args_list[:3]
+        assert [c.kwargs["temperature"] for c in calls] == [0, 0.3, 0.6]
+        assert len({c.kwargs["seed"] for c in calls}) == 3
