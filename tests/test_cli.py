@@ -127,9 +127,10 @@ class TestExtractPlaintext:
         # Should return empty string for non-existent chapter
         assert result == ""
 
+    @patch.dict(sys.modules, {'fitz': None})
     @patch('pypdf.PdfReader')
     def test_extract_pdf_text(self, mock_pdf_reader):
-        """Test extracting plaintext from a PDF input."""
+        """Test extracting plaintext from a PDF input with the pypdf fallback."""
         mock_page = Mock()
         mock_page.extract_text.return_value = "First paragraph.\n\nSecond paragraph."
         mock_pdf_reader.return_value.pages = [mock_page]
@@ -139,6 +140,36 @@ class TestExtractPlaintext:
         assert 'First paragraph.' in result
         assert 'Second paragraph.' in result
 
+
+    def test_extract_pdf_text_pymupdf_soft_hyphens(self):
+        """Test PyMuPDF extraction with soft hyphens removed, including across line breaks."""
+        mock_page = Mock()
+        # PyMuPDF blocks: (x0, y0, x1, y1, text, block_no, block_type)
+        mock_page.get_text.return_value = [
+            (0, 0, 1, 1, "The Age of In\u00adtel\u00adli\u00adgent Ma\u00ad\nchines\n", 0, 0),
+            (0, 0, 1, 1, "<image>", 1, 1),
+        ]
+        mock_fitz = Mock()
+        mock_fitz.open.return_value.__enter__ = Mock(return_value=[mock_page])
+        mock_fitz.open.return_value.__exit__ = Mock(return_value=False)
+
+        with patch.dict(sys.modules, {'fitz': mock_fitz}):
+            result = extract_plaintext(Path('sample.pdf'), 'en')
+
+        assert result == "The Age of Intelligent Machines\n"
+
+    def test_soft_hyphen_across_page_break(self):
+        """Test that a word hyphenated at the end of a page is rejoined."""
+        from cli import read_input_document
+        with patch('cli.extract_pdf_pages', return_value=["end of Lind\u00ad\n", "say Boffoli"]):
+            text, _ = read_input_document(Path('sample.pdf'))
+        assert text == "end of Lindsay Boffoli"
+
+    def test_pdf_to_html_joins_layout_lines(self):
+        """Test that line breaks inside a paragraph are turned into spaces."""
+        from cli import pdf_to_html
+        assert pdf_to_html("first line\nsecond line\n\nnext <para>") == \
+            "<html><body><p>first line second line</p><p>next &lt;para&gt;</p></body></html>"
 
 class TestRunModelTranslation:
     """Test model translation functionality."""
@@ -459,3 +490,33 @@ class TestModelArgumentParsing:
                                     
                                     expected_models = ["dorian2b/vera", "mistral:7b"]
                                     assert models_used == expected_models
+
+
+class TestTranslatePdfHtml:
+    """Test chunk-by-chunk PDF translation with resumable progress."""
+
+    @patch('cli.translate_with_fallback')
+    def test_resume_after_failure(self, mock_translate, temp_dir):
+        """Test that a failed run saves finished chunks and the next run only translates the rest."""
+        from cli import translate_pdf_html, TranslationError
+        workspace = temp_dir / 'progress.json'
+        html = "<html><body>" + "".join(f"<p>Part {i} {'x' * 1000}</p>" for i in range(3)) + "</body></html>"
+
+        def fake(models, prompt, url, chunk_html, progress, **kwargs):
+            if 'Part 1' in chunk_html and mock_translate.fail:
+                raise TranslationError("boom")
+            return chunk_html.replace('Part', 'Partie'), models[0]
+        mock_translate.side_effect = fake
+
+        mock_translate.fail = True
+        assert translate_pdf_html(html, ['m'], 'prompt', 'url', workspace, max_chunk_chars=1100) is None
+        assert mock_translate.call_count == 2
+        assert workspace.exists()
+
+        mock_translate.fail = False
+        result = translate_pdf_html(html, ['m'], 'prompt', 'url', workspace, max_chunk_chars=1100)
+
+        # Only the two remaining chunks are translated on the second run
+        assert mock_translate.call_count == 4
+        assert result.startswith("<html><body><p>Partie 0")
+        assert result.count("<p>Partie") == 3

@@ -1,16 +1,26 @@
+import json
 import pytest
 import responses
 from unittest.mock import patch, Mock
 import requests
 
 from libs.translation import (
-    TranslationError, validate_translation, dynamic_chunks,
-    translate_with_chunking, _translate_once
+    TranslationError, EmptyOutputError, validate_translation, dynamic_chunks,
+    translate_with_chunking, _translate_once, get_model_limits, compute_max_chunk_chars
 )
 
 
 class TestValidateTranslation:
     """Test translation validation functionality."""
+
+    def test_truncated_translation_rejected(self):
+        """Test validation fails when output is much shorter than a long original."""
+        original = "".join(f"<p>Paragraph {i} with a fair amount of original text inside.</p>" for i in range(30))
+        translation = "<p>Paragraphe 0 avec pas mal de texte traduit.</p>"
+
+        is_valid, error_cleaned, _ = validate_translation(original, translation)
+        assert is_valid is False
+        assert "truncated" in error_cleaned
     
     def test_valid_translation(self):
         """Test validation of a valid translation."""
@@ -165,7 +175,88 @@ class TestTranslateOnce:
         
         result = _translate_once(api_base, model, prompt, block)
         assert "successful translation" in result.lower()
-    
+
+    @responses.activate
+    def test_api_key_sent_as_bearer(self, mock_translation_response):
+        """Test that api_key is sent as Authorization header, and omitted when absent."""
+        api_base = "http://localhost:11434"
+        responses.add(responses.POST, f"{api_base}/api/chat", json=mock_translation_response, status=200)
+        responses.add(responses.POST, f"{api_base}/api/chat", json=mock_translation_response, status=200)
+
+        _translate_once(api_base, "test-model", "prompt", "<p>Hello world</p>", api_key="secret")
+        _translate_once(api_base, "test-model", "prompt", "<p>Hello world</p>")
+
+        assert responses.calls[0].request.headers["Authorization"] == "Bearer secret"
+        assert "Authorization" not in responses.calls[1].request.headers
+
+    @responses.activate
+    def test_openai_compatible_endpoint(self):
+        """Test that a /v1 base URL uses the OpenAI-compatible chat completions API."""
+        api_base = "https://openrouter.ai/api/v1"
+        responses.add(
+            responses.POST,
+            f"{api_base}/chat/completions",
+            json={"choices": [{"message": {"role": "assistant", "content": "<p>Bonjour le monde</p>"}}]},
+            status=200,
+        )
+
+        result = _translate_once(api_base, "test-model", "prompt", "<p>Hello world</p>", api_key="secret")
+
+        assert "Bonjour" in result
+        body = json.loads(responses.calls[0].request.body)
+        assert body["temperature"] == 0
+        assert "options" not in body
+
+    @responses.activate
+    def test_openai_truncated_output_rejected(self):
+        """Test that finish_reason=length is treated as a failure."""
+        api_base = "https://openrouter.ai/api/v1"
+        responses.add(
+            responses.POST,
+            f"{api_base}/chat/completions",
+            json={"choices": [{"message": {"content": "<p>Bonjour le</p>"}, "finish_reason": "length"}]},
+            status=200,
+        )
+
+        with pytest.raises(TranslationError, match="truncated"):
+            _translate_once(api_base, "test-model", "prompt", "<p>Hello world</p>")
+
+    @responses.activate
+    def test_empty_output_switches_to_user_message_prompt(self):
+        """Test that a model returning an empty output with a system prompt is retried without it, for good."""
+        api_base = "https://openrouter.ai/api/v1"
+        url = f"{api_base}/chat/completions"
+        responses.add(responses.POST, url, status=200, json={
+            "choices": [{"message": {"content": None}, "finish_reason": "stop"}]})
+        responses.add(responses.POST, url, status=200, json={
+            "choices": [{"message": {"content": "<p>Bonjour le monde</p>"}, "finish_reason": "stop"}]})
+        responses.add(responses.POST, url, status=200, json={
+            "choices": [{"message": {"content": "<p>Salut</p>"}, "finish_reason": "stop"}]})
+
+        with patch('libs.translation._NO_SYSTEM_PROMPT_MODELS', set()):
+            assert _translate_once(api_base, "hy-mt", "Translate", "<p>Hello world</p>") == "<p>Bonjour le monde</p>"
+            assert _translate_once(api_base, "hy-mt", "Translate", "<p>Hi</p>") == "<p>Salut</p>"
+
+        sent = [json.loads(call.request.body)["messages"] for call in responses.calls]
+        assert [m["role"] for m in sent[0]] == ["system", "user"]
+        assert sent[1] == [{"role": "user", "content": "Translate\n\n<p>Hello world</p>"}]
+        assert sent[2] == [{"role": "user", "content": "Translate\n\n<p>Hi</p>"}]
+
+    @responses.activate
+    def test_null_content_reports_provider_error(self):
+        """Test that a null content response includes the provider error details."""
+        api_base = "https://openrouter.ai/api/v1"
+        responses.add(
+            responses.POST,
+            f"{api_base}/chat/completions",
+            json={"choices": [{"message": {"content": None}, "finish_reason": "error",
+                               "error": {"message": "Upstream timeout"}}]},
+            status=200,
+        )
+
+        with pytest.raises(TranslationError, match="finish_reason=error.*Upstream timeout"):
+            _translate_once(api_base, "test-model", "prompt", "<p>Hello world</p>")
+
     @responses.activate
     def test_invalid_translation_retry(self):
         """Test that _translate_once raises error for invalid translation."""
@@ -315,6 +406,73 @@ class TestTranslateWithChunking:
             result, model_used = translate_with_chunking(api_base, model, prompt, html, progress, chapter_info="Chapter 1/5")
 
 
+    @patch('libs.translation._translate_once')
+    def test_failed_chunk_retried_without_restarting_previous_ones(self, mock_translate):
+        """Test that a transient chunk failure retries only that chunk."""
+        mock_translate.side_effect = [
+            "<p>Un</p>",
+            TranslationError("missing 'content' field"),
+            "<p>Deux</p>",
+            "<p>Trois</p>",
+        ]
+        # Above MAX_SINGLE_REQUEST_CHARS: no full translation attempt
+        body = "".join(f"<p>{word} {'x' * 6000}</p>" for word in ("One", "Two", "Three"))
+
+        result, model_used = translate_with_chunking("http://localhost:11434", "m1", "prompt",
+                                                     body, {"preferred_chunk_size": 6100})
+
+        assert result.count("<p>") == 3
+        assert "Un" in result and "Deux" in result and "Trois" in result
+        assert mock_translate.call_count == 4
+        assert model_used == "m1"
+
+    @patch('libs.translation._translate_once')
+    def test_persistently_failing_chunk_is_split(self, mock_translate):
+        """Test that a chunk failing every attempt is split in half, alone."""
+        mock_translate.side_effect = [TranslationError("bad")] * 3 + ["<p>A</p>", "<p>B</p>", "<p>C</p>"]
+        # Two chunks of two paragraphs each, no full translation attempt
+        body = "".join(f"<p>{word} {'x' * 5000}</p>" for word in ("One", "Two", "Three", "Four"))
+
+        result, _ = translate_with_chunking("http://localhost:11434", "m1", "prompt", body,
+                                            {"preferred_chunk_size": 10100})
+
+        assert "<p>A</p><p>B</p><p>C</p>" in result
+        assert mock_translate.call_count == 6
+
+    @patch('libs.translation._translate_once')
+    def test_fallback_model_used_for_failing_chunk_only(self, mock_translate):
+        """Test that the next model is tried only for the chunk that fails."""
+        def fake(api_base, model, prompt, block, *args, **kwargs):
+            if model == "m1" and "Two" in block:
+                raise TranslationError("bad")
+            return f"<p>{model}</p>"
+        mock_translate.side_effect = fake
+        body = "".join(f"<p>{word} {'x' * 1500}</p>" for word in ("One", "Two", "Three"))
+
+        result, model_used = translate_with_chunking("http://localhost:11434", ["m1", "m2"], "prompt",
+                                                     body, {"preferred_chunk_size": 1600})
+
+        assert "<p>m1</p><p>m2</p><p>m1</p>" in result
+        assert model_used == "m1"
+
+    @patch('libs.translation._translate_once')
+    def test_empty_output_switches_model_without_retrying(self, mock_translate):
+        """Test that an empty output goes straight to the next model, without retries nor splitting."""
+        def fake(api_base, model, prompt, block, *args, **kwargs):
+            if model == "m1":
+                raise EmptyOutputError("missing 'content' field")
+            return "<p>traduit</p>"
+        mock_translate.side_effect = fake
+        body = "".join(f"<p>Part {i} {'x' * 2500}</p>" for i in range(7))
+
+        result, _ = translate_with_chunking("http://localhost:11434", ["m1", "m2"], "prompt", body,
+                                            {"preferred_chunk_size": 5100})
+
+        models = [call.args[1] for call in mock_translate.call_args_list]
+        # Each chunk: one m1 call, then m2
+        assert models == ["m1", "m2"] * (len(models) // 2)
+        assert result.count("<p>traduit</p>") == len(models) // 2
+
 class TestBackticksHandling:
     """Test backticks cleaning in translation validation."""
     
@@ -389,3 +547,56 @@ class TestBackticksHandling:
         is_valid, error_cleaned, cleaned_content = validate_translation(original, translation)
         assert is_valid is True
         assert cleaned_content == "<p>First paragraph.</p><p>Second paragraph.</p>"
+
+
+class TestModelLimits:
+    """Test chunk size derivation from the model token limits."""
+
+    @responses.activate
+    def test_openrouter_limits(self):
+        """Test reading context and output limits from an OpenRouter /models listing."""
+        api_base = "https://openrouter.ai/api/v1"
+        responses.add(responses.GET, f"{api_base}/models", json={"data": [
+            {"id": "other", "context_length": 1000},
+            {"id": "tencent/hy-mt2-30b-a3b", "context_length": 8192,
+             "top_provider": {"max_completion_tokens": 4096}},
+        ]})
+
+        assert get_model_limits(api_base, "tencent/hy-mt2-30b-a3b") == (8192, 4096)
+        assert get_model_limits(api_base, "missing-model") == (None, None)
+
+    @responses.activate
+    def test_limits_unavailable(self):
+        """Test that failures and non OpenAI-compatible APIs return unknown limits."""
+        responses.add(responses.GET, "https://api.example.com/v1/models", status=500)
+
+        assert get_model_limits("https://api.example.com/v1", "m") == (None, None)
+        assert get_model_limits("http://localhost:11434", "m") == (None, None)
+
+    def test_output_limit_bounds_chunk_size(self):
+        """Test that the translated chunk must fit the max output tokens."""
+        size = compute_max_chunk_chars(8192, 4096, "p" * 1000)
+        # Estimated translation of the chunk fits within the output limit
+        assert size / 3 * 1.3 <= 4096
+        assert size > 5000
+
+    def test_context_limit_bounds_chunk_size(self):
+        """Test that prompt, chunk and translation must fit the context window."""
+        size = compute_max_chunk_chars(4096, None, "p" * 3000)
+        assert 1000 + size / 3 * 2.3 <= 4096
+
+    def test_unknown_limits(self):
+        """Test that unknown limits give no chunk size."""
+        assert compute_max_chunk_chars(None, None, "prompt") is None
+
+    @patch('libs.translation._translate_once')
+    def test_max_chunk_chars_forces_chunking(self, mock_translate):
+        """Test that content above max_chunk_chars is never sent in one request."""
+        mock_translate.side_effect = lambda api_base, model, prompt, block, *a, **k: "<p>ok</p>"
+        body = "".join(f"<p>Paragraph {i} {'x' * 1000}</p>" for i in range(6))
+
+        translate_with_chunking("http://localhost:11434", "m1", "prompt", body, {}, max_chunk_chars=3000)
+
+        sent = [call.args[3] for call in mock_translate.call_args_list]
+        assert len(sent) > 1
+        assert all(len(block) <= 3100 for block in sent)

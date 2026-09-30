@@ -530,3 +530,11 @@ class TestDRMDetection:
         
         with pytest.raises(zipfile.BadZipFile):
             detect_drm(str(corrupted_epub))
+
+
+def test_language_name():
+    """Test that language codes and names map to the English name used in prompts."""
+    from libs.epub_utils import language_name
+    assert language_name("fr") == "French"
+    assert language_name("french") == "French"
+    assert language_name("Klingon") == "Klingon"
